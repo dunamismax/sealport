@@ -319,16 +319,16 @@ where documented verification passes on a clean checkout.
 
 ### Phase 1 - Workspace Foundation
 
-- [ ] Add `rust-toolchain.toml`.
-- [ ] Add Cargo workspace with Rust 2024 edition.
-- [ ] Add crates: `sealport-cli`, `sealport-core`, `sealport-storage`,
+- [x] Add `rust-toolchain.toml`.
+- [x] Add Cargo workspace with Rust 2024 edition.
+- [x] Add crates: `sealport-cli`, `sealport-core`, `sealport-storage`,
       `sealport-crypto`, `sealport-platform`, `sealport-policy`, and
       `sealport-testkit`.
-- [ ] Add workspace dependency policy.
-- [ ] Add `sealport-cli` binary with `clap`.
-- [ ] Add `just fmt`, `just check`, `just test`, and `just build`.
-- [ ] Add GitHub Actions for formatting, clippy, tests, and build.
-- [ ] Add basic `sealport version`.
+- [x] Add workspace dependency policy.
+- [x] Add `sealport-cli` binary with `clap`.
+- [x] Add `just fmt`, `just check`, `just test`, and `just build`.
+- [x] Add GitHub Actions for formatting, clippy, tests, and build.
+- [x] Add basic `sealport version`.
 
 ### Phase 2 - CLI, Config, And Output Contract
 
@@ -513,5 +513,10 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-17 - Bootstrapped the Rust workspace with the planned crate
+  boundaries, workspace dependency policy, `sealport-cli` binary, basic
+  `sealport version`, `just` recipes, and GitHub Actions CI. Verified with
+  `just check`, individual `just fmt`/`just test`/`just build` recipes,
+  direct `sealport version` smoke checks, and workflow YAML parsing.
 - 2026-05-17 - Created the initial SealPort planning docs:
   `README.md`, `BUILD.md`, and `AGENTS.md`.
