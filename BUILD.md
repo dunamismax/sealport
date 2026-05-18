@@ -26,6 +26,10 @@ Last reviewed: 2026-05-18.
 - `ferry init` creates encrypted local filesystem repositories from
   `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`; S3-compatible repository
   bootstrap is still not wired into the CLI.
+- `ferry backup` opens initialized local repositories, unlocks them with
+  `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, creates encrypted,
+  compressed, deduplicated snapshots through the core backup pipeline, and
+  exposes tested human, JSON, and JSONL-safe output paths.
 - `ferry snapshots` and `ferry ls` open initialized local repositories,
   authenticate committed encrypted manifests, and expose tested human, JSON,
   and JSONL-safe output paths.
@@ -74,9 +78,9 @@ Last reviewed: 2026-05-18.
 - The product target is an all-Rust, cross-platform, encrypted backup CLI
   named `ferry`.
 
-The repo is still pre-v1 and the backup/restore engine is not wired into the
-CLI. Describe backup, restore, repository, storage, crypto, or platform
-behavior only to the level backed by code, tests, and platform evidence.
+The repo is still pre-v1 and restore is not wired into the CLI. Describe
+backup, restore, repository, storage, crypto, or platform behavior only to the
+level backed by code, tests, and platform evidence.
 
 The `fileferry-web` crate is public marketing infrastructure only. It does not
 turn FileFerry into a backup server, hosted product, daemon, scheduler, or web
@@ -343,7 +347,7 @@ Minimum v1 bar:
 
 - [x] Rust workspace exists with the target crate boundaries.
 - [ ] `ferry init` creates encrypted local and S3-compatible repositories.
-- [ ] `ferry backup` creates encrypted, compressed, deduplicated snapshots.
+- [x] `ferry backup` creates encrypted, compressed, deduplicated snapshots.
 - [ ] `ferry restore` restores by snapshot id, tag, path, and `latest`.
 - [x] `ferry snapshots` and `ferry ls` have human, JSON, and JSONL-safe
       behavior where appropriate.
@@ -588,6 +592,18 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Wired `ferry backup` into `fileferry-cli` for initialized local
+  repositories. The command accepts one or more local source paths plus repeated
+  `--tag`, unlocks through `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`,
+  runs the existing core backup pipeline, commits the snapshot, and emits
+  human, JSON, and JSONL-safe output with backup summary fields and progress
+  phases. Extended core snapshot write results with scanned entry counts, entry
+  kind counts, scanned/uploaded byte counts, chunk seen/written/reused counts,
+  and index ids. Added CLI integration tests that run `ferry init`, `ferry
+  backup`, `ferry snapshots`, and `ferry ls` end to end against a real local
+  repository, plus JSONL and wrong-password coverage. Verified initially with
+  `cargo test -p fileferry-core -p fileferry-cli`; full gate passed with
+  `just fmt`, `just check`, `just test`, `just build`, and `git diff --check`.
 - 2026-05-18 - Wired the first end-user repository commands into
   `fileferry-cli`: `ferry init` now creates an encrypted local filesystem
   repository bootstrap from `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`,

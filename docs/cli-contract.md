@@ -346,6 +346,25 @@ init command_completed
   status: "success"
   data: Init data schema above
 
+backup command_started
+  status: "started"
+  data: null
+
+backup progress
+  status: "started"
+  data.phase: "walk_sources" | "plan_chunks" | "write_chunks" | "write_index" | "write_manifest" | "write_commit" | "complete"
+  data.message: string
+  data.items_done: integer | null
+  data.items_total: integer | null
+  data.bytes_done: integer | null
+  data.bytes_total: integer | null
+  data.snapshot_id: string | null
+  data.object_key: string | null
+
+backup command_completed
+  status: "success"
+  data: Backup data schema above
+
 snapshots command_started
   status: "started"
   data: null
@@ -381,6 +400,15 @@ and JSONL modes. Machine progress belongs in JSONL `progress` events.
 `FILEFERRY_REPOSITORY` points at a local path or `file:///absolute/path`.
 It requires `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`. S3-compatible
 repository bootstrap is not wired into the CLI yet.
+
+`ferry backup <SOURCE>...` opens an initialized local repository with
+`FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, creates an encrypted,
+compressed, deduplicated snapshot through the core backup pipeline, and commits
+it so `ferry snapshots` and `ferry ls` can discover it. `--tag <TAG>` may be
+repeated. JSON output follows the Backup data schema above; JSONL output emits
+the implemented progress phases listed above. Source paths are local
+filesystem paths; S3-compatible repository bootstrap remains unwired in the
+CLI.
 
 `ferry snapshots` opens an initialized local repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed

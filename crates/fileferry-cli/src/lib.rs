@@ -1,7 +1,7 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use fileferry_core::{
-    BackupPipeline, BackupPipelineConfig, CoreError, MetadataStatus, SnapshotEntry,
+    BackupPipeline, BackupPipelineConfig, BackupRequest, CoreError, MetadataStatus, SnapshotEntry,
     SnapshotSelection, create_repository, list_snapshot_entries, open_repository, select_snapshot,
     snapshot_summaries,
 };
@@ -14,6 +14,7 @@ use std::{
     collections::BTreeMap,
     env, fs, io,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
 
@@ -83,6 +84,17 @@ pub enum Command {
 
     /// Create an encrypted local repository.
     Init,
+
+    /// Create an encrypted snapshot from local source paths.
+    Backup {
+        /// Tag to attach to the snapshot. May be repeated.
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+
+        /// Source paths to include in the snapshot.
+        #[arg(required = true, value_name = "SOURCE")]
+        sources: Vec<PathBuf>,
+    },
 
     /// List committed snapshots.
     Snapshots,
@@ -442,6 +454,28 @@ struct InitData {
     key_slots: usize,
 }
 
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct BackupData {
+    snapshot_id: String,
+    repository_id: String,
+    started_at_unix_seconds: u64,
+    completed_at_unix_seconds: u64,
+    sources: Vec<String>,
+    tags: Vec<String>,
+    entries_scanned: usize,
+    files_backed_up: usize,
+    directories_backed_up: usize,
+    symlinks_backed_up: usize,
+    special_entries_seen: usize,
+    bytes_scanned: u64,
+    bytes_uploaded: u64,
+    chunks_seen: usize,
+    chunks_written: usize,
+    chunks_reused: usize,
+    index_ids: Vec<String>,
+    manifest_id: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum CliBackendKind {
@@ -488,6 +522,18 @@ enum CliTimestampStatus {
     Denied,
 }
 
+#[derive(Debug, Serialize)]
+struct ProgressData {
+    phase: &'static str,
+    message: &'static str,
+    items_done: Option<usize>,
+    items_total: Option<usize>,
+    bytes_done: Option<u64>,
+    bytes_total: Option<u64>,
+    snapshot_id: Option<String>,
+    object_key: Option<String>,
+}
+
 pub fn run(cli: Cli) -> Result<Output, CliError> {
     let mode = OutputMode::from_globals(&cli.globals);
 
@@ -496,6 +542,10 @@ pub fn run(cli: Cli) -> Result<Output, CliError> {
         Command::Init => {
             let config = resolve_config(&cli.globals)?;
             init_repository(mode, &config)
+        }
+        Command::Backup { tags, sources } => {
+            let config = resolve_config(&cli.globals)?;
+            backup(mode, &config, sources, tags)
         }
         Command::Snapshots => {
             let config = resolve_config(&cli.globals)?;
@@ -761,6 +811,60 @@ fn init_repository(mode: OutputMode, config: &ResolvedConfig) -> Result<Output, 
     })
 }
 
+fn backup(
+    mode: OutputMode,
+    config: &ResolvedConfig,
+    sources: Vec<PathBuf>,
+    tags: Vec<String>,
+) -> Result<Output, CliError> {
+    let repository = local_repository(config)?;
+    let passphrase = repository_passphrase()?;
+    let roots = sources
+        .iter()
+        .map(|source| absolute_source_path(source))
+        .collect::<Result<Vec<_>, _>>()?;
+    let source_display = roots
+        .iter()
+        .map(|source| redact_for_display(&source.display().to_string()))
+        .collect::<Vec<_>>();
+    let started_at_unix_seconds = unix_seconds_now()?;
+    let runtime = tokio_runtime()?;
+    let opened = runtime.block_on(open_repository(&repository.store, &passphrase))?;
+    let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id.clone()))?;
+    let result = runtime.block_on(pipeline.write_snapshot(
+        &repository.store,
+        &opened.master_key,
+        BackupRequest {
+            roots,
+            exclusion_rules: Vec::new(),
+            tags: tags.clone(),
+        },
+    ))?;
+    let completed_at_unix_seconds = unix_seconds_now()?;
+    let data = BackupData {
+        snapshot_id: result.snapshot_id.clone(),
+        repository_id: opened.repository_id,
+        started_at_unix_seconds,
+        completed_at_unix_seconds,
+        sources: source_display,
+        tags,
+        entries_scanned: result.entries_scanned,
+        files_backed_up: result.files_backed_up,
+        directories_backed_up: result.directories_backed_up,
+        symlinks_backed_up: result.symlinks_backed_up,
+        special_entries_seen: result.special_entries_seen,
+        bytes_scanned: result.bytes_scanned,
+        bytes_uploaded: result.bytes_uploaded,
+        chunks_seen: result.chunks_seen,
+        chunks_written: result.chunks_written,
+        chunks_reused: result.chunks_reused,
+        index_ids: result.index_ids,
+        manifest_id: result.snapshot_id,
+    };
+
+    emit_backup_command(mode, data)
+}
+
 fn snapshots(mode: OutputMode, config: &ResolvedConfig) -> Result<Output, CliError> {
     let loaded = load_repository_snapshots(config)?;
     let data = SnapshotsData {
@@ -926,6 +1030,23 @@ fn tokio_runtime() -> Result<tokio::runtime::Runtime, RepositoryError> {
     tokio::runtime::Runtime::new().map_err(|source| RepositoryError::Runtime { source })
 }
 
+fn absolute_source_path(path: &Path) -> Result<PathBuf, RepositoryError> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        env::current_dir()
+            .map(|current_dir| current_dir.join(path))
+            .map_err(|source| RepositoryError::Runtime { source })
+    }
+}
+
+fn unix_seconds_now() -> Result<u64, CliError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|source| CliError::Core(Box::new(CoreError::SystemClock { source })))
+}
+
 fn snapshot_selection(
     snapshot: Option<String>,
     tag: Option<String>,
@@ -978,6 +1099,84 @@ where
                 serde_json::to_string(&started)?,
                 serde_json::to_string(&completed)?
             )
+        }
+    };
+
+    Ok(Output {
+        stdout,
+        stderr: String::new(),
+    })
+}
+
+fn emit_backup_command(mode: OutputMode, data: BackupData) -> Result<Output, CliError> {
+    let stdout = match mode {
+        OutputMode::Human => format!(
+            "Created snapshot {}\nentries={} files={} directories={} symlinks={} bytes_scanned={} chunks_seen={} chunks_written={} chunks_reused={}\n",
+            data.snapshot_id,
+            data.entries_scanned,
+            data.files_backed_up,
+            data.directories_backed_up,
+            data.symlinks_backed_up,
+            data.bytes_scanned,
+            data.chunks_seen,
+            data.chunks_written,
+            data.chunks_reused
+        ),
+        OutputMode::Json => {
+            let document = CommandDocument {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                command: "backup",
+                status: CommandStatus::Success,
+                data,
+            };
+            format!("{}\n", serde_json::to_string_pretty(&document)?)
+        }
+        OutputMode::Jsonl => {
+            let started = CommandEvent::<BackupData> {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                event: EventKind::CommandStarted,
+                command: "backup",
+                status: CommandStatus::Started,
+                data: None,
+            };
+            let phases = [
+                ("walk_sources", "walked source paths"),
+                ("plan_chunks", "planned content chunks"),
+                ("write_chunks", "wrote encrypted chunks"),
+                ("write_index", "wrote encrypted chunk index"),
+                ("write_manifest", "wrote encrypted snapshot manifest"),
+                ("write_commit", "wrote snapshot commit marker"),
+                ("complete", "completed backup"),
+            ];
+            let mut lines = vec![serde_json::to_string(&started)?];
+            for (phase, message) in phases {
+                let event = CommandEvent {
+                    schema_version: OUTPUT_SCHEMA_VERSION,
+                    event: EventKind::Progress,
+                    command: "backup",
+                    status: CommandStatus::Started,
+                    data: Some(ProgressData {
+                        phase,
+                        message,
+                        items_done: Some(data.entries_scanned),
+                        items_total: Some(data.entries_scanned),
+                        bytes_done: Some(data.bytes_scanned),
+                        bytes_total: Some(data.bytes_scanned),
+                        snapshot_id: Some(data.snapshot_id.clone()),
+                        object_key: None,
+                    }),
+                };
+                lines.push(serde_json::to_string(&event)?);
+            }
+            let completed = CommandEvent {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                event: EventKind::CommandCompleted,
+                command: "backup",
+                status: CommandStatus::Success,
+                data: Some(data),
+            };
+            lines.push(serde_json::to_string(&completed)?);
+            lines.join("\n") + "\n"
         }
     };
 

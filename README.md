@@ -352,9 +352,9 @@ V1 should not include:
 The repo contains the initial Rust workspace, crate boundaries, CLI shell, CI
 workflow, planning docs, tested crypto primitives, local and S3-compatible
 storage groundwork, and core backup/restore primitives. The CLI currently
-exposes `version`, `completion`, local repository `init`, `snapshots`, and
-`ls`; backup and restore primitives are not wired into end-user commands yet.
-The repository format is still not frozen.
+exposes `version`, `completion`, local repository `init`, `backup`,
+`snapshots`, and `ls`; restore primitives are not wired into end-user commands
+yet. The repository format is still not frozen.
 
 The normal local gate is:
 

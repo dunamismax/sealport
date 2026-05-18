@@ -747,14 +747,39 @@ impl BackupPipeline {
         let mut manifest_entries = Vec::with_capacity(entries.len());
         let mut index_entries = Vec::new();
         let mut chunk_objects_written = 0_usize;
+        let mut chunk_objects_reused = 0_usize;
+        let mut chunks_seen = 0_usize;
+        let mut bytes_scanned = 0_u64;
+        let mut bytes_uploaded = 0_u64;
+        let mut files_backed_up = 0_usize;
+        let mut directories_backed_up = 0_usize;
+        let mut symlinks_backed_up = 0_usize;
+        let mut special_entries_seen = 0_usize;
 
         for mut entry in entries {
+            match entry.metadata.kind {
+                EntryKind::RegularFile => {
+                    files_backed_up += 1;
+                }
+                EntryKind::Directory => {
+                    directories_backed_up += 1;
+                }
+                EntryKind::Symlink => {
+                    symlinks_backed_up += 1;
+                }
+                EntryKind::Other => {
+                    special_entries_seen += 1;
+                }
+            }
+
             if entry.metadata.kind == EntryKind::RegularFile {
                 let file_bytes = fs::read(&entry.path).map_err(|source| CoreError::FileRead {
                     path: entry.path.clone(),
                     source,
                 })?;
+                bytes_scanned += file_bytes.len() as u64;
                 for chunk in self.chunker.chunk_bytes(&file_bytes) {
+                    chunks_seen += 1;
                     let start = usize::try_from(chunk.offset).map_err(|_| {
                         CoreError::InvalidChunkRange {
                             path: entry.path.clone(),
@@ -804,9 +829,16 @@ impl BackupPipeline {
                             .await
                             .map_err(|source| CoreError::Storage { source })?
                         {
-                            PutStatus::Created => chunk_objects_written += 1,
-                            PutStatus::AlreadyPresent => {}
+                            PutStatus::Created => {
+                                chunk_objects_written += 1;
+                                bytes_uploaded += encrypted.len() as u64;
+                            }
+                            PutStatus::AlreadyPresent => {
+                                chunk_objects_reused += 1;
+                            }
                         }
+                    } else {
+                        chunk_objects_reused += 1;
                     }
 
                     let chunk_ref = ManifestChunkRef {
@@ -845,8 +877,14 @@ impl BackupPipeline {
             chunks: index_entries,
         };
         let index_object = object_key_for_id("objects/index", &index_id)?;
-        write_encrypted_json_object(store, &index_key, ObjectKind::Index, &index_object, &index)
-            .await?;
+        bytes_uploaded += write_encrypted_json_object(
+            store,
+            &index_key,
+            ObjectKind::Index,
+            &index_object,
+            &index,
+        )
+        .await?;
 
         let manifest_body = SnapshotManifestBody {
             created_at_unix_seconds: current_unix_seconds()?,
@@ -866,7 +904,7 @@ impl BackupPipeline {
             body: manifest_body,
         };
         let manifest_object = object_key_for_id("objects/manifest", &snapshot_id)?;
-        write_encrypted_json_object(
+        let manifest_bytes_written = write_encrypted_json_object(
             store,
             &manifest_key,
             ObjectKind::SnapshotManifest,
@@ -874,6 +912,7 @@ impl BackupPipeline {
             &manifest,
         )
         .await?;
+        bytes_uploaded += manifest_bytes_written;
 
         let commit_object = object_key_for_commit(&snapshot_id)?;
         let commit = SnapshotCommit {
@@ -883,18 +922,34 @@ impl BackupPipeline {
         };
         let commit_bytes =
             serde_json::to_vec(&commit).map_err(|source| CoreError::Serialization { source })?;
-        store
+        let commit_status = store
             .put_if_absent(&commit_object, &commit_bytes)
             .await
             .map_err(|source| CoreError::Storage { source })?;
+        if commit_status == PutStatus::Created {
+            bytes_uploaded += commit_bytes.len() as u64;
+        }
 
         Ok(SnapshotWriteResult {
             snapshot_id,
+            created_at_unix_seconds: manifest.body.created_at_unix_seconds,
             manifest_object,
             index_object,
+            index_ids: manifest.body.index_ids,
             commit_object,
             chunk_objects_written,
+            chunk_objects_reused,
             entries: manifest.body.entries.len(),
+            entries_scanned: manifest.body.entries.len(),
+            files_backed_up,
+            directories_backed_up,
+            symlinks_backed_up,
+            special_entries_seen,
+            bytes_scanned,
+            bytes_uploaded,
+            chunks_seen,
+            chunks_written: chunk_objects_written,
+            chunks_reused: chunk_objects_reused,
             chunks: index.chunks.len(),
         })
     }
@@ -1239,11 +1294,24 @@ impl BackupPipeline {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SnapshotWriteResult {
     pub snapshot_id: String,
+    pub created_at_unix_seconds: u64,
     pub manifest_object: ObjectKey,
     pub index_object: ObjectKey,
+    pub index_ids: Vec<String>,
     pub commit_object: ObjectKey,
     pub chunk_objects_written: usize,
+    pub chunk_objects_reused: usize,
     pub entries: usize,
+    pub entries_scanned: usize,
+    pub files_backed_up: usize,
+    pub directories_backed_up: usize,
+    pub symlinks_backed_up: usize,
+    pub special_entries_seen: usize,
+    pub bytes_scanned: u64,
+    pub bytes_uploaded: u64,
+    pub chunks_seen: usize,
+    pub chunks_written: usize,
+    pub chunks_reused: usize,
     pub chunks: usize,
 }
 
@@ -1578,15 +1646,19 @@ async fn write_encrypted_json_object<T: Serialize>(
     kind: ObjectKind,
     object_key: &ObjectKey,
     value: &T,
-) -> CoreResult<()> {
+) -> CoreResult<u64> {
     let plaintext =
         serde_json::to_vec(value).map_err(|source| CoreError::Serialization { source })?;
     let encrypted = encrypt_repository_object(key, kind, object_key, &plaintext)?;
-    store
+    let encrypted_len = encrypted.len() as u64;
+    let status = store
         .put_if_absent(object_key, &encrypted)
         .await
         .map_err(|source| CoreError::Storage { source })?;
-    Ok(())
+    Ok(match status {
+        PutStatus::Created => encrypted_len,
+        PutStatus::AlreadyPresent => 0,
+    })
 }
 
 async fn read_encrypted_json_object<T: for<'de> Deserialize<'de>>(
@@ -2350,8 +2422,20 @@ mod tests {
             .expect("snapshot write");
 
         assert_eq!(result.entries, 3);
+        assert_eq!(result.entries_scanned, 3);
+        assert_eq!(result.files_backed_up, 2);
+        assert_eq!(result.directories_backed_up, 1);
+        assert_eq!(result.symlinks_backed_up, 0);
+        assert_eq!(result.special_entries_seen, 0);
+        assert_eq!(result.bytes_scanned, 24);
+        assert_eq!(result.chunks_seen, 2);
         assert_eq!(result.chunks, 1);
         assert_eq!(result.chunk_objects_written, 1);
+        assert_eq!(result.chunk_objects_reused, 1);
+        assert_eq!(result.chunks_written, 1);
+        assert_eq!(result.chunks_reused, 1);
+        assert_eq!(result.index_ids.len(), 1);
+        assert!(result.bytes_uploaded > 0);
         assert_eq!(store.object_count().await, 4);
 
         let keys = store
