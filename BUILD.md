@@ -30,7 +30,11 @@ Last reviewed: 2026-05-18.
   passphrase key-slot unlock, HKDF subkeys, and XChaCha20-Poly1305 object
   envelopes.
 - `sealport-storage` has a tested object-store trait, capability model,
-  validated object keys, and local filesystem backend.
+  validated object keys, local filesystem backend, and S3-compatible backend.
+- `sealport-policy` has a tested parser for count-based and tag-based
+  retention keep rules.
+- `docs/platform-metadata.md` defines the v1 metadata capture target and
+  restore reporting behavior for unrepresentable metadata.
 - `sealport-testkit` has a tested in-memory fake object store for future
   repository and pipeline tests.
 - The initial product brief has been distilled into `README.md`,
@@ -273,10 +277,10 @@ Target platforms:
 
 Platform work:
 
-- [ ] Define metadata capture for files, directories, symlinks, permissions,
+- [x] Define metadata capture for files, directories, symlinks, permissions,
       timestamps, ownership, xattrs, ACLs, resource forks, and Windows
       attributes.
-- [ ] Decide v1 restore behavior for metadata that cannot be represented on
+- [x] Decide v1 restore behavior for metadata that cannot be represented on
       the destination platform.
 - [ ] Add platform-specific tests for path normalization, reserved names,
       symlinks, hard links if supported, case sensitivity, long paths, and
@@ -367,7 +371,7 @@ where documented verification passes on a clean checkout.
 ### Phase 4 - Storage Backends
 
 - [x] Implement local filesystem backend.
-- [ ] Implement S3-compatible backend through `object_store` or a documented
+- [x] Implement S3-compatible backend through `object_store` or a documented
       lower-level choice.
 - [x] Add storage capability model.
 - [ ] Add retry, timeout, concurrency, and backoff behavior.
@@ -417,7 +421,7 @@ where documented verification passes on a clean checkout.
 
 ### Phase 9 - Retention And Prune
 
-- [ ] Implement retention policy parser.
+- [x] Implement retention policy parser.
 - [ ] Implement `forget`.
 - [ ] Implement two-phase prune.
 - [ ] Add prune marks and recovery behavior.
@@ -527,6 +531,12 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Added the first `sealport-policy` retention policy parser for
+  count-based keep rules and repeated tag keep rules, documented current CLI
+  JSON/JSONL schemas and data-mode progress behavior, and added
+  `docs/platform-metadata.md` for v1 metadata capture and cross-platform
+  restore reporting decisions. Verified initially with `cargo test -p
+  sealport-policy -p sealport-cli`; full gate recorded with this change.
 - 2026-05-18 - Completed the first Phase 3 slice: documented format v0
   security choices and repository-format structure, selected Argon2id,
   HKDF-SHA-256, and XChaCha20-Poly1305, implemented tested master-key

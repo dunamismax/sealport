@@ -74,6 +74,27 @@ directory.
 `status` is `success` for completed commands. Future commands may add
 command-specific fields under `data` without changing the envelope.
 
+Current schema:
+
+```text
+CommandDocument<T>
+  schema_version: integer, currently 1
+  command: string
+  status: "success" | "failure"
+  data: T
+```
+
+Implemented command documents:
+
+```text
+version
+  data.command: "sealport"
+  data.version: semantic-version string from the package version
+```
+
+`completion <SHELL>` writes the requested shell script directly to stdout. It
+does not support JSON wrapping because the completion script itself is the data.
+
 ## JSONL Event Envelope
 
 `--jsonl` emits newline-delimited events:
@@ -95,6 +116,33 @@ command_failed
 
 Long-running commands must emit at least `command_started` and either
 `command_completed` or `command_failed`.
+
+Current schema:
+
+```text
+CommandEvent<T>
+  schema_version: integer, currently 1
+  event: "command_started" | "progress" | "warning" | "command_completed" | "command_failed"
+  command: string
+  status: "started" | "success" | "failure"
+  data: T | null
+```
+
+Implemented command events:
+
+```text
+version command_started
+  status: "started"
+  data: null
+
+version command_completed
+  status: "success"
+  data.command: "sealport"
+  data.version: semantic-version string from the package version
+```
+
+Future long-running commands must keep human progress off stdout in both JSON
+and JSONL modes. Machine progress belongs in JSONL `progress` events.
 
 ## Current Commands
 

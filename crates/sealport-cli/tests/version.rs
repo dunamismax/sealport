@@ -48,6 +48,32 @@ fn version_subcommand_supports_json() {
 }
 
 #[test]
+fn version_json_mode_emits_one_stdout_document_and_no_progress() {
+    let mut command = sealport();
+
+    let output = command
+        .args(["--json", "version"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).expect("utf8 stdout");
+
+    assert_eq!(stdout.matches("\"schema_version\"").count(), 1);
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count(),
+        9
+    );
+    assert!(!stdout.contains("command_started"));
+    assert!(!stdout.contains("progress"));
+}
+
+#[test]
 fn global_output_flags_work_after_subcommands() {
     let mut command = sealport();
 
@@ -86,6 +112,29 @@ fn version_subcommand_supports_jsonl_events() {
     assert_eq!(started["event"], "command_started");
     assert_eq!(completed["event"], "command_completed");
     assert_eq!(completed["data"]["version"], "0.0.0");
+}
+
+#[test]
+fn version_jsonl_mode_emits_only_stdout_events_and_no_human_progress() {
+    let mut command = sealport();
+
+    let output = command
+        .args(["--jsonl", "version"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+
+    for line in output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let event: serde_json::Value = serde_json::from_slice(line).expect("jsonl event");
+        assert!(event.get("schema_version").is_some());
+        assert_ne!(event["event"], "progress");
+    }
 }
 
 #[test]

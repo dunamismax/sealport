@@ -348,8 +348,9 @@ Durable implementation details should move into `docs/` as they settle,
 especially architecture, repository format, security, CLI/JSON contracts,
 storage behavior, platform metadata, operations, and release process. Current
 design docs include [`docs/security.md`](docs/security.md),
-[`docs/repository-format.md`](docs/repository-format.md), and
-[`docs/cli-contract.md`](docs/cli-contract.md).
+[`docs/repository-format.md`](docs/repository-format.md),
+[`docs/cli-contract.md`](docs/cli-contract.md), and
+[`docs/platform-metadata.md`](docs/platform-metadata.md).
 
 ## License
 
