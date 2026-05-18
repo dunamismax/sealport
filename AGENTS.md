@@ -193,6 +193,9 @@ access.
 ## Storage Rules
 
 - V1 storage is local filesystem plus S3-compatible object storage.
+- Development S3-compatible testing uses Stephen's private Backblaze B2 bucket
+  `dunamismax-b2`; follow `docs/backblaze-b2-dev-storage.md` for the endpoint,
+  environment variables, and current Backblaze capability notes.
 - Object storage backends need capability checks, retry policy, timeout policy,
   upload idempotency, and interruption behavior.
 - Multipart uploads must have cleanup or recovery guidance.
