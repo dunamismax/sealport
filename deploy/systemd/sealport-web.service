@@ -1,0 +1,25 @@
+[Unit]
+Description=SealPort public homepage
+Documentation=https://sealport.cc/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sealport-web
+Group=sealport-web
+WorkingDirectory=/opt/sealport-web
+EnvironmentFile=-/etc/sealport-web/sealport-web.env
+ExecStart=/opt/sealport-web/sealport-web
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=20s
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/sealport-web
+
+[Install]
+WantedBy=multi-user.target

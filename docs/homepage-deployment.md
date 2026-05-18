@@ -14,7 +14,7 @@ cargo run -p sealport-web
 The default listener is `0.0.0.0:8080`. Override it with:
 
 ```sh
-SEALPORT_WEB_ADDR=127.0.0.1:8080 cargo run -p sealport-web
+SEALPORT_WEB_ADDR=127.0.0.1:8096 cargo run -p sealport-web
 ```
 
 `GET /healthz` returns `ok` for reverse-proxy and process supervision checks.
@@ -29,10 +29,14 @@ cargo build --release -p sealport-web
 sudo install -m 0755 target/release/sealport-web /usr/local/bin/sealport-web
 ```
 
+The production host uses the repo-owned templates under `deploy/` and binds
+the homepage to `127.0.0.1:8096` so it does not conflict with other local Rust
+sites.
+
 Create a dedicated unprivileged user:
 
 ```sh
-sudo useradd --system --home /var/lib/sealport-web --shell /usr/sbin/nologin sealport-web
+sudo useradd --system --home /opt/sealport-web --shell /usr/sbin/nologin sealport-web
 ```
 
 Example systemd unit:
@@ -46,15 +50,15 @@ Wants=network-online.target
 [Service]
 User=sealport-web
 Group=sealport-web
-Environment=SEALPORT_WEB_ADDR=127.0.0.1:8080
-ExecStart=/usr/local/bin/sealport-web
+Environment=SEALPORT_WEB_ADDR=127.0.0.1:8096
+ExecStart=/opt/sealport-web/sealport-web
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/sealport-web
+ReadWritePaths=/opt/sealport-web
 
 [Install]
 WantedBy=multi-user.target
@@ -63,10 +67,10 @@ WantedBy=multi-user.target
 Install and start it:
 
 ```sh
-sudo install -m 0644 sealport-web.service /etc/systemd/system/sealport-web.service
+sudo install -m 0644 deploy/systemd/sealport-web.service /etc/systemd/system/sealport-web.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now sealport-web
-curl -fsS http://127.0.0.1:8080/healthz
+curl -fsS http://127.0.0.1:8096/healthz
 ```
 
 ## Reverse Proxy
@@ -77,7 +81,7 @@ Example Caddy site:
 
 ```caddyfile
 sealport.cc {
-	reverse_proxy 127.0.0.1:8080
+	reverse_proxy 127.0.0.1:8096
 }
 ```
 
@@ -89,7 +93,7 @@ server {
     server_name sealport.cc www.sealport.cc;
 
     location / {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass http://127.0.0.1:8096;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
