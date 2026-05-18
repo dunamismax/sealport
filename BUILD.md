@@ -54,6 +54,9 @@ Last reviewed: 2026-05-18.
 - `fileferry-core` has initial tested restore primitives for manifest
   timestamps, snapshot selection by id/tag/latest, and path-scoped regular-file
   content reassembly from encrypted chunks.
+- `fileferry-core` can restore regular-file content to a destination directory
+  with destination safety checks, explicit overwrite policy, dry-run reporting,
+  and optional byte-for-byte verification.
 - `fileferry-web` serves the public `fileferry.app` homepage with Axum,
   server-rendered Leptos views, embedded CSS, and a `/healthz` endpoint.
 - The initial product brief has been distilled into `README.md`,
@@ -436,10 +439,10 @@ where documented verification passes on a clean checkout.
 
 - [x] Implement snapshot selection by id, tag, and `latest`.
 - [x] Implement path-scoped restore.
-- [ ] Implement destination safety checks.
+- [x] Implement destination safety checks.
 - [ ] Implement metadata restore per platform.
-- [ ] Add overwrite policy and dry-run reporting.
-- [ ] Add restore verification.
+- [x] Add overwrite policy and dry-run reporting.
+- [x] Add restore verification.
 - [ ] Add restore drill docs.
 
 ### Phase 7 - Listing, Search, And Diff
@@ -575,6 +578,11 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Added destination restore primitives in `fileferry-core`:
+  regular-file content can now be restored under an absolute destination root
+  with path containment checks, symlinked-destination rejection, explicit
+  fail-if-exists or overwrite behavior, dry-run reporting, and optional
+  byte-for-byte verification. Verified with `cargo test -p fileferry-core`.
 - 2026-05-18 - Added the first restore pipeline slice in `fileferry-core`:
   snapshot manifests now carry creation timestamps, loaded manifests can be
   selected by id, newest matching tag, or latest overall, and restore content

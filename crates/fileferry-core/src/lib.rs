@@ -127,6 +127,38 @@ pub enum CoreError {
     #[error("restore request is invalid: {reason}")]
     InvalidRestoreRequest { reason: &'static str },
 
+    #[error("restore destination {path} is not absolute")]
+    RestoreDestinationNotAbsolute { path: PathBuf },
+
+    #[error("restore destination {path} escapes the requested destination root")]
+    RestoreDestinationEscapesRoot { path: PathBuf },
+
+    #[error("restore destination {path} contains a symlink at {symlink}")]
+    RestoreDestinationSymlink { path: PathBuf, symlink: PathBuf },
+
+    #[error("restore destination {path} already exists")]
+    RestoreDestinationExists { path: PathBuf },
+
+    #[error("restore destination {path} has the wrong entry kind")]
+    RestoreDestinationKind { path: PathBuf },
+
+    #[error("restore destination {path} could not be written")]
+    RestoreDestinationWrite {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("restore destination {path} could not be read for verification")]
+    RestoreVerificationRead {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("restore verification failed for {path}")]
+    RestoreVerificationMismatch { path: PathBuf },
+
     #[error("system clock is before the Unix epoch")]
     SystemClock {
         #[source]
@@ -761,6 +793,74 @@ impl BackupPipeline {
         })
     }
 
+    pub async fn restore_snapshot_to_destination(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        request: RestoreDestinationRequest,
+    ) -> CoreResult<RestoreDestinationResult> {
+        validate_restore_destination_root(&request.destination)?;
+
+        let contents = self
+            .restore_snapshot_contents(
+                store,
+                master_key,
+                RestoreContentRequest {
+                    snapshot_id: request.snapshot_id,
+                    paths: request.paths,
+                },
+            )
+            .await?;
+        let file_count = contents.files.len();
+        let mut planned_files = Vec::with_capacity(contents.files.len());
+
+        for file in contents.files {
+            let destination_path =
+                safe_destination_path(&request.destination, &file.relative_path)?;
+            ensure_restore_destination_safe(
+                &request.destination,
+                &destination_path,
+                request.overwrite,
+            )?;
+            let byte_len = file.contents.len() as u64;
+
+            if !request.dry_run {
+                write_restored_file(
+                    &destination_path,
+                    &file.contents,
+                    request.overwrite,
+                    request.verify,
+                )?;
+            }
+
+            planned_files.push(RestoreDestinationFile {
+                relative_path: file.relative_path,
+                destination_path,
+                bytes: byte_len,
+                action: if request.dry_run {
+                    RestoreDestinationAction::WouldWrite
+                } else {
+                    RestoreDestinationAction::Written
+                },
+                verified: request.verify && !request.dry_run,
+            });
+        }
+
+        let bytes = planned_files.iter().map(|file| file.bytes).sum();
+        Ok(RestoreDestinationResult {
+            snapshot_id: contents.snapshot_id,
+            selected_entries: contents.selected_entries,
+            files: planned_files,
+            bytes,
+            dry_run: request.dry_run,
+            verified_files: if request.verify && !request.dry_run {
+                file_count
+            } else {
+                0
+            },
+        })
+    }
+
     async fn load_chunk_index_entries(
         &self,
         store: &dyn ObjectStore,
@@ -849,6 +949,48 @@ pub struct RestoreContentResult {
 pub struct RestoredFile {
     pub relative_path: PathBuf,
     pub contents: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RestoreOverwritePolicy {
+    #[default]
+    FailIfExists,
+    OverwriteFiles,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoreDestinationRequest {
+    pub snapshot_id: String,
+    pub paths: Vec<PathBuf>,
+    pub destination: PathBuf,
+    pub overwrite: RestoreOverwritePolicy,
+    pub dry_run: bool,
+    pub verify: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoreDestinationResult {
+    pub snapshot_id: String,
+    pub selected_entries: usize,
+    pub files: Vec<RestoreDestinationFile>,
+    pub bytes: u64,
+    pub dry_run: bool,
+    pub verified_files: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoreDestinationFile {
+    pub relative_path: PathBuf,
+    pub destination_path: PathBuf,
+    pub bytes: u64,
+    pub action: RestoreDestinationAction,
+    pub verified: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestoreDestinationAction {
+    WouldWrite,
+    Written,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -1045,6 +1187,156 @@ fn normalize_restore_path(path: &Path) -> CoreResult<PathBuf> {
     }
 
     Ok(normalized)
+}
+
+fn validate_restore_destination_root(destination: &Path) -> CoreResult<()> {
+    if !destination.is_absolute() {
+        return Err(CoreError::RestoreDestinationNotAbsolute {
+            path: destination.to_path_buf(),
+        });
+    }
+
+    Ok(())
+}
+
+fn safe_destination_path(destination: &Path, relative_path: &Path) -> CoreResult<PathBuf> {
+    let relative_path = normalize_restore_path(relative_path)?;
+    let destination_path = destination.join(relative_path);
+
+    if !destination_path.starts_with(destination) {
+        return Err(CoreError::RestoreDestinationEscapesRoot {
+            path: destination_path,
+        });
+    }
+
+    Ok(destination_path)
+}
+
+fn ensure_restore_destination_safe(
+    root: &Path,
+    destination_path: &Path,
+    overwrite: RestoreOverwritePolicy,
+) -> CoreResult<()> {
+    ensure_no_symlink_ancestor(root, destination_path)?;
+
+    match fs::symlink_metadata(destination_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(CoreError::RestoreDestinationSymlink {
+                path: destination_path.to_path_buf(),
+                symlink: destination_path.to_path_buf(),
+            })
+        }
+        Ok(metadata) if metadata.is_file() => match overwrite {
+            RestoreOverwritePolicy::FailIfExists => Err(CoreError::RestoreDestinationExists {
+                path: destination_path.to_path_buf(),
+            }),
+            RestoreOverwritePolicy::OverwriteFiles => Ok(()),
+        },
+        Ok(_) => Err(CoreError::RestoreDestinationKind {
+            path: destination_path.to_path_buf(),
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(CoreError::RestoreDestinationWrite {
+            path: destination_path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn ensure_no_symlink_ancestor(root: &Path, destination_path: &Path) -> CoreResult<()> {
+    let parent = destination_path
+        .parent()
+        .ok_or(CoreError::RestoreDestinationEscapesRoot {
+            path: destination_path.to_path_buf(),
+        })?;
+    let mut cursor = PathBuf::new();
+
+    for component in parent.components() {
+        cursor.push(component.as_os_str());
+        if !cursor.starts_with(root) {
+            continue;
+        }
+
+        match fs::symlink_metadata(&cursor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CoreError::RestoreDestinationSymlink {
+                    path: destination_path.to_path_buf(),
+                    symlink: cursor,
+                });
+            }
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                return Err(CoreError::RestoreDestinationKind { path: cursor });
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(CoreError::RestoreDestinationWrite {
+                    path: cursor,
+                    source,
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn write_restored_file(
+    destination_path: &Path,
+    contents: &[u8],
+    overwrite: RestoreOverwritePolicy,
+    verify: bool,
+) -> CoreResult<()> {
+    if let Some(parent) = destination_path.parent() {
+        fs::create_dir_all(parent).map_err(|source| CoreError::RestoreDestinationWrite {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+
+    let mut options = fs::OpenOptions::new();
+    options.write(true);
+    match overwrite {
+        RestoreOverwritePolicy::FailIfExists => {
+            options.create_new(true);
+        }
+        RestoreOverwritePolicy::OverwriteFiles => {
+            options.create(true).truncate(true);
+        }
+    }
+    let mut file =
+        options
+            .open(destination_path)
+            .map_err(|source| CoreError::RestoreDestinationWrite {
+                path: destination_path.to_path_buf(),
+                source,
+            })?;
+    io::Write::write_all(&mut file, contents).map_err(|source| {
+        CoreError::RestoreDestinationWrite {
+            path: destination_path.to_path_buf(),
+            source,
+        }
+    })?;
+    file.sync_all()
+        .map_err(|source| CoreError::RestoreDestinationWrite {
+            path: destination_path.to_path_buf(),
+            source,
+        })?;
+
+    if verify {
+        let restored =
+            fs::read(destination_path).map_err(|source| CoreError::RestoreVerificationRead {
+                path: destination_path.to_path_buf(),
+                source,
+            })?;
+        if restored != contents {
+            return Err(CoreError::RestoreVerificationMismatch {
+                path: destination_path.to_path_buf(),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 fn scoped_manifest_entries<'a>(
@@ -1605,6 +1897,236 @@ mod tests {
             .expect_err("unsafe restore path");
 
         assert!(matches!(error, CoreError::InvalidRestoreRequest { .. }));
+    }
+
+    #[tokio::test]
+    async fn restore_snapshot_to_destination_writes_and_verifies_files() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let source = tempfile::tempdir().expect("source tempdir");
+        let destination = tempfile::tempdir().expect("destination tempdir");
+        fs::create_dir(source.path().join("docs")).expect("create docs");
+        fs::write(source.path().join("docs/one.txt"), b"one").expect("write one");
+        fs::write(source.path().join("docs/two.txt"), b"two").expect("write two");
+        fs::write(source.path().join("skip.txt"), b"skip").expect("write skip");
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+
+        let restored = pipeline
+            .restore_snapshot_to_destination(
+                &store,
+                &master_key,
+                RestoreDestinationRequest {
+                    snapshot_id: result.snapshot_id.clone(),
+                    paths: vec![PathBuf::from("docs")],
+                    destination: destination.path().to_path_buf(),
+                    overwrite: RestoreOverwritePolicy::FailIfExists,
+                    dry_run: false,
+                    verify: true,
+                },
+            )
+            .await
+            .expect("destination restore");
+
+        assert_eq!(restored.snapshot_id, result.snapshot_id);
+        assert_eq!(restored.files.len(), 2);
+        assert_eq!(restored.bytes, 6);
+        assert_eq!(restored.verified_files, 2);
+        assert!(restored.files.iter().all(|file| file.verified));
+        assert_eq!(
+            fs::read(destination.path().join("docs/one.txt")).expect("restored one"),
+            b"one"
+        );
+        assert_eq!(
+            fs::read(destination.path().join("docs/two.txt")).expect("restored two"),
+            b"two"
+        );
+        assert!(!destination.path().join("skip.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn restore_snapshot_to_destination_dry_run_reports_without_writes() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let source = tempfile::tempdir().expect("source tempdir");
+        let destination = tempfile::tempdir().expect("destination tempdir");
+        fs::write(source.path().join("sample.txt"), b"sample").expect("write sample");
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+
+        let restored = pipeline
+            .restore_snapshot_to_destination(
+                &store,
+                &master_key,
+                RestoreDestinationRequest {
+                    snapshot_id: result.snapshot_id,
+                    paths: Vec::new(),
+                    destination: destination.path().to_path_buf(),
+                    overwrite: RestoreOverwritePolicy::FailIfExists,
+                    dry_run: true,
+                    verify: true,
+                },
+            )
+            .await
+            .expect("dry-run restore");
+
+        assert!(restored.dry_run);
+        assert_eq!(restored.verified_files, 0);
+        assert_eq!(restored.files.len(), 1);
+        assert_eq!(
+            restored.files[0].action,
+            RestoreDestinationAction::WouldWrite
+        );
+        assert_eq!(restored.files[0].bytes, 6);
+        assert!(!destination.path().join("sample.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn restore_snapshot_to_destination_enforces_overwrite_policy() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let source = tempfile::tempdir().expect("source tempdir");
+        let destination = tempfile::tempdir().expect("destination tempdir");
+        fs::write(source.path().join("sample.txt"), b"new").expect("write sample");
+        fs::write(destination.path().join("sample.txt"), b"old").expect("write existing");
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+
+        let blocked = pipeline
+            .restore_snapshot_to_destination(
+                &store,
+                &master_key,
+                RestoreDestinationRequest {
+                    snapshot_id: result.snapshot_id.clone(),
+                    paths: Vec::new(),
+                    destination: destination.path().to_path_buf(),
+                    overwrite: RestoreOverwritePolicy::FailIfExists,
+                    dry_run: false,
+                    verify: false,
+                },
+            )
+            .await
+            .expect_err("existing destination should block restore");
+        assert!(matches!(
+            blocked,
+            CoreError::RestoreDestinationExists { .. }
+        ));
+        assert_eq!(
+            fs::read(destination.path().join("sample.txt")).expect("existing file"),
+            b"old"
+        );
+
+        let overwritten = pipeline
+            .restore_snapshot_to_destination(
+                &store,
+                &master_key,
+                RestoreDestinationRequest {
+                    snapshot_id: result.snapshot_id,
+                    paths: Vec::new(),
+                    destination: destination.path().to_path_buf(),
+                    overwrite: RestoreOverwritePolicy::OverwriteFiles,
+                    dry_run: false,
+                    verify: true,
+                },
+            )
+            .await
+            .expect("overwrite restore");
+        assert_eq!(overwritten.files.len(), 1);
+        assert_eq!(
+            fs::read(destination.path().join("sample.txt")).expect("overwritten file"),
+            b"new"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restore_snapshot_to_destination_rejects_symlinked_destination_ancestors() {
+        use fileferry_testkit::FakeObjectStore;
+        use std::os::unix::fs::symlink;
+
+        let source = tempfile::tempdir().expect("source tempdir");
+        let destination = tempfile::tempdir().expect("destination tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        fs::create_dir(source.path().join("docs")).expect("create docs");
+        fs::write(source.path().join("docs/sample.txt"), b"sample").expect("write sample");
+        symlink(outside.path(), destination.path().join("docs")).expect("symlink ancestor");
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+
+        let error = pipeline
+            .restore_snapshot_to_destination(
+                &store,
+                &master_key,
+                RestoreDestinationRequest {
+                    snapshot_id: result.snapshot_id,
+                    paths: vec![PathBuf::from("docs")],
+                    destination: destination.path().to_path_buf(),
+                    overwrite: RestoreOverwritePolicy::OverwriteFiles,
+                    dry_run: false,
+                    verify: false,
+                },
+            )
+            .await
+            .expect_err("symlink ancestor should block restore");
+
+        assert!(matches!(error, CoreError::RestoreDestinationSymlink { .. }));
+        assert!(!outside.path().join("sample.txt").exists());
     }
 
     #[tokio::test]
