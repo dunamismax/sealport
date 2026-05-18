@@ -58,6 +58,15 @@ events. A strict mode may promote those warnings to failure.
 Restore applies content first, then portable metadata, then platform-specific
 metadata that the destination can represent.
 
+Current implementation status: initialized local repository restores apply
+captured modified timestamps for restored regular files and directories after
+content writes and verification. They do not restore symlink timestamps,
+creation/birth time, ownership, mode bits, ACLs, xattrs, resource forks,
+Windows attributes, BSD flags, sparse extents, or other platform-specific
+metadata yet. A timestamp that was selected for application but could not be
+applied is reported as a metadata warning; a restore with only metadata
+warnings returns partial-success exit code `10`.
+
 When metadata cannot be represented on the destination platform, FileFerry must:
 
 - Restore file content and directory structure whenever doing so is safe.

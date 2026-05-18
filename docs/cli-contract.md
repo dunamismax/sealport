@@ -33,7 +33,7 @@ These exit code families are stable for the current CLI foundation:
 ```
 
 The current implementation can emit these families for the implemented command
-surface: `0`, `1`, `2`, `3`, `4`, `5`, `6`, `7`, and `9`.
+surface: `0`, `1`, `2`, `3`, `4`, `5`, `6`, `7`, `9`, and `10`.
 
 ## Global Precedence
 
@@ -209,6 +209,11 @@ SnapshotSummary
   source_count: integer
   entry_count: integer
 
+RestoreMetadataWarning
+  path: snapshot-relative string
+  field: string
+  reason: string
+
 SnapshotEntry
   path: snapshot-relative string
   kind: "regular_file" | "directory" | "symlink" | "other"
@@ -305,10 +310,8 @@ progress
   data.object_key: string | null
 
 warning
-  data.code: stable string
-  data.message: string
-  data.path: redacted string | snapshot-relative string | null
-  data.object_key: string | null
+  data: command-specific warning data. Restore currently emits
+        RestoreMetadataWarning.
 
 command_completed
   data: same command-specific data as the matching JSON document
@@ -469,9 +472,13 @@ after directory and regular-file writes so restore writes do not traverse
 newly restored symlinks. `--dry-run` reports selected entries and planned
 writes without creating destination entries. JSON output follows the Restore
 data schema above; JSONL output emits the implemented progress phases listed
-above. Metadata application is not implemented yet; the command reports zero
-for `metadata_applied` and emits metadata warnings only when real warning data
-exists.
+above. Current metadata application is limited to captured modified timestamps
+for restored regular files and directories. Symlink timestamps, ownership,
+mode bits, ACLs, xattrs, resource forks, Windows attributes, BSD flags, and
+other platform-specific metadata are not restored yet. If a timestamp is
+selected for application but cannot be applied, restore reports a
+`metadata_warnings` item and exits with partial-success code `10`; JSON and
+JSONL modes keep those warnings on stdout.
 
 `ferry check` opens an initialized local repository with `FILEFERRY_PASSWORD`
 or `FILEFERRY_PASSWORD_FILE`, authenticates committed snapshot manifests,

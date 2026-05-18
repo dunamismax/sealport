@@ -454,6 +454,7 @@ struct OutputConfig {
 pub struct Output {
     pub stdout: String,
     pub stderr: String,
+    pub exit_code: i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -697,7 +698,10 @@ pub fn run_with_error_output(cli: Cli) -> (Output, i32) {
     let command = cli.command.name();
 
     match run(cli) {
-        Ok(output) => (output, 0),
+        Ok(output) => {
+            let exit_code = output.exit_code;
+            (output, exit_code)
+        }
         Err(error) => {
             let exit_code = error.exit_code();
             match render_error_output(mode, command, &error, exit_code) {
@@ -706,6 +710,7 @@ pub fn run_with_error_output(cli: Cli) -> (Output, i32) {
                     Output {
                         stdout: String::new(),
                         stderr: format!("{render_error}\n"),
+                        exit_code: render_error.exit_code(),
                     },
                     render_error.exit_code(),
                 ),
@@ -725,6 +730,7 @@ fn render_error_output(
         OutputMode::Human => Output {
             stdout: String::new(),
             stderr: format!("{error}\n"),
+            exit_code,
         },
         OutputMode::Json => {
             let document = CommandDocument {
@@ -736,6 +742,7 @@ fn render_error_output(
             Output {
                 stdout: format!("{}\n", serde_json::to_string_pretty(&document)?),
                 stderr: String::new(),
+                exit_code,
             }
         }
         OutputMode::Jsonl => {
@@ -760,6 +767,7 @@ fn render_error_output(
                     serde_json::to_string(&failed)?
                 ),
                 stderr: String::new(),
+                exit_code,
             }
         }
     };
@@ -1193,6 +1201,7 @@ fn completion(shell: Shell) -> Result<Output, CliError> {
     Ok(Output {
         stdout,
         stderr: String::new(),
+        exit_code: 0,
     })
 }
 
@@ -1459,7 +1468,7 @@ fn restore(
         files_written,
         directories_written,
         symlinks_written,
-        metadata_applied: 0,
+        metadata_applied: result.metadata_applied,
         metadata_warnings: result
             .metadata_warnings
             .into_iter()
@@ -1639,6 +1648,7 @@ where
     Ok(Output {
         stdout,
         stderr: String::new(),
+        exit_code: 0,
     })
 }
 
@@ -1717,10 +1727,20 @@ fn emit_backup_command(mode: OutputMode, data: BackupData) -> Result<Output, Cli
     Ok(Output {
         stdout,
         stderr: String::new(),
+        exit_code: 0,
     })
 }
 
 fn emit_restore_command(mode: OutputMode, data: RestoreData) -> Result<Output, CliError> {
+    let exit_code = if data.metadata_warnings.is_empty() {
+        0
+    } else {
+        10
+    };
+    let stderr = match mode {
+        OutputMode::Human => restore_warning_stderr(&data.metadata_warnings),
+        OutputMode::Json | OutputMode::Jsonl => String::new(),
+    };
     let stdout = match mode {
         OutputMode::Human => {
             let action = if data.dry_run {
@@ -1786,6 +1806,16 @@ fn emit_restore_command(mode: OutputMode, data: RestoreData) -> Result<Output, C
                 };
                 lines.push(serde_json::to_string(&event)?);
             }
+            for warning in &data.metadata_warnings {
+                let event = CommandEvent {
+                    schema_version: OUTPUT_SCHEMA_VERSION,
+                    event: EventKind::Warning,
+                    command: "restore",
+                    status: CommandStatus::Started,
+                    data: Some(warning),
+                };
+                lines.push(serde_json::to_string(&event)?);
+            }
             let completed = CommandEvent {
                 schema_version: OUTPUT_SCHEMA_VERSION,
                 event: EventKind::CommandCompleted,
@@ -1800,8 +1830,21 @@ fn emit_restore_command(mode: OutputMode, data: RestoreData) -> Result<Output, C
 
     Ok(Output {
         stdout,
-        stderr: String::new(),
+        stderr,
+        exit_code,
     })
+}
+
+fn restore_warning_stderr(warnings: &[RestoreMetadataWarning]) -> String {
+    warnings
+        .iter()
+        .map(|warning| {
+            format!(
+                "warning: restore metadata {} for {}: {}\n",
+                warning.field, warning.path, warning.reason
+            )
+        })
+        .collect()
 }
 
 fn emit_check_command(
@@ -1891,6 +1934,7 @@ fn emit_check_command(
     Ok(Output {
         stdout,
         stderr: String::new(),
+        exit_code: 0,
     })
 }
 
@@ -1997,6 +2041,7 @@ fn version(mode: OutputMode) -> Result<Output, CliError> {
     Ok(Output {
         stdout,
         stderr: String::new(),
+        exit_code: 0,
     })
 }
 
@@ -2053,6 +2098,78 @@ mod tests {
         );
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(lines[1]).expect("complete event")["event"],
+            "command_completed"
+        );
+    }
+
+    #[test]
+    fn restore_metadata_warnings_use_partial_success_exit_code() {
+        let output = emit_restore_command(
+            OutputMode::Human,
+            RestoreData {
+                snapshot_id: "snapshot".to_owned(),
+                destination: "/restore".to_owned(),
+                paths: Vec::new(),
+                dry_run: false,
+                overwrite: CliRestoreOverwritePolicy::FailIfExists,
+                entries_selected: 1,
+                files_written: 1,
+                directories_written: 0,
+                symlinks_written: 0,
+                metadata_applied: 0,
+                metadata_warnings: vec![RestoreMetadataWarning {
+                    path: "sample.txt".to_owned(),
+                    field: "modified".to_owned(),
+                    reason: "modified timestamp was not captured".to_owned(),
+                }],
+                bytes_written: 6,
+                verified_files: 1,
+            },
+        )
+        .expect("restore output");
+
+        assert_eq!(output.exit_code, 10);
+        assert!(output.stdout.contains("Restored snapshot snapshot"));
+        assert!(output.stderr.contains("warning: restore metadata modified"));
+    }
+
+    #[test]
+    fn restore_jsonl_metadata_warnings_stay_on_stdout() {
+        let output = emit_restore_command(
+            OutputMode::Jsonl,
+            RestoreData {
+                snapshot_id: "snapshot".to_owned(),
+                destination: "/restore".to_owned(),
+                paths: Vec::new(),
+                dry_run: false,
+                overwrite: CliRestoreOverwritePolicy::FailIfExists,
+                entries_selected: 1,
+                files_written: 1,
+                directories_written: 0,
+                symlinks_written: 0,
+                metadata_applied: 0,
+                metadata_warnings: vec![RestoreMetadataWarning {
+                    path: "sample.txt".to_owned(),
+                    field: "modified".to_owned(),
+                    reason: "modified timestamp was not captured".to_owned(),
+                }],
+                bytes_written: 6,
+                verified_files: 1,
+            },
+        )
+        .expect("restore output");
+
+        let lines = output
+            .stdout
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("jsonl event"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(output.exit_code, 10);
+        assert_eq!(output.stderr, "");
+        assert!(lines.iter().any(|event| event["event"] == "warning"));
+        assert_eq!(
+            lines.last().expect("completed event")["event"],
             "command_completed"
         );
     }

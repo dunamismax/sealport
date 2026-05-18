@@ -19,7 +19,7 @@ use std::{
     fs, io,
     path::Component,
     path::{Path, PathBuf},
-    time::{SystemTime, SystemTimeError, UNIX_EPOCH},
+    time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -1402,6 +1402,7 @@ impl BackupPipeline {
                 EntryKind::Directory => {
                     directories.push(RestoredDirectory {
                         relative_path: entry.relative_path.clone(),
+                        modified: entry.metadata.modified.clone(),
                     });
                     continue;
                 }
@@ -1501,6 +1502,7 @@ impl BackupPipeline {
             files.push(RestoredFile {
                 relative_path: entry.relative_path.clone(),
                 contents,
+                modified: entry.metadata.modified.clone(),
             });
         }
 
@@ -1536,6 +1538,8 @@ impl BackupPipeline {
         let mut planned_directories = Vec::with_capacity(contents.directories.len());
         let mut planned_files = Vec::with_capacity(contents.files.len());
         let mut planned_symlinks = Vec::with_capacity(contents.symlinks.len());
+        let mut metadata_warnings = contents.metadata_warnings;
+        let mut metadata_applied = 0_usize;
 
         for directory in contents.directories {
             let destination_path =
@@ -1549,6 +1553,7 @@ impl BackupPipeline {
             planned_directories.push(RestoreDestinationDirectory {
                 relative_path: directory.relative_path,
                 destination_path,
+                modified: directory.modified,
                 action: if request.dry_run {
                     RestoreDestinationAction::WouldWrite
                 } else {
@@ -1580,6 +1585,7 @@ impl BackupPipeline {
                 relative_path: file.relative_path,
                 destination_path,
                 bytes: byte_len,
+                modified: file.modified,
                 action: if request.dry_run {
                     RestoreDestinationAction::WouldWrite
                 } else {
@@ -1610,6 +1616,28 @@ impl BackupPipeline {
             });
         }
 
+        if !request.dry_run {
+            for file in &planned_files {
+                metadata_applied += apply_restored_modified_timestamp(
+                    &file.destination_path,
+                    &file.relative_path,
+                    &file.modified,
+                    RestoredMetadataTarget::RegularFile,
+                    &mut metadata_warnings,
+                );
+            }
+
+            for directory in &planned_directories {
+                metadata_applied += apply_restored_modified_timestamp(
+                    &directory.destination_path,
+                    &directory.relative_path,
+                    &directory.modified,
+                    RestoredMetadataTarget::Directory,
+                    &mut metadata_warnings,
+                );
+            }
+        }
+
         let bytes = planned_files.iter().map(|file| file.bytes).sum();
         Ok(RestoreDestinationResult {
             snapshot_id: contents.snapshot_id,
@@ -1617,7 +1645,8 @@ impl BackupPipeline {
             directories: planned_directories,
             files: planned_files,
             symlinks: planned_symlinks,
-            metadata_warnings: contents.metadata_warnings,
+            metadata_applied,
+            metadata_warnings,
             bytes,
             dry_run: request.dry_run,
             verified_files: if request.verify && !request.dry_run {
@@ -1896,12 +1925,14 @@ pub struct RestoreContentResult {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RestoredDirectory {
     pub relative_path: PathBuf,
+    pub modified: MetadataValue<Timestamp>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RestoredFile {
     pub relative_path: PathBuf,
     pub contents: Vec<u8>,
+    pub modified: MetadataValue<Timestamp>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1934,6 +1965,7 @@ pub struct RestoreDestinationResult {
     pub directories: Vec<RestoreDestinationDirectory>,
     pub files: Vec<RestoreDestinationFile>,
     pub symlinks: Vec<RestoreDestinationSymlink>,
+    pub metadata_applied: usize,
     pub metadata_warnings: Vec<RestoreMetadataWarning>,
     pub bytes: u64,
     pub dry_run: bool,
@@ -1944,6 +1976,7 @@ pub struct RestoreDestinationResult {
 pub struct RestoreDestinationDirectory {
     pub relative_path: PathBuf,
     pub destination_path: PathBuf,
+    pub modified: MetadataValue<Timestamp>,
     pub action: RestoreDestinationAction,
 }
 
@@ -1952,6 +1985,7 @@ pub struct RestoreDestinationFile {
     pub relative_path: PathBuf,
     pub destination_path: PathBuf,
     pub bytes: u64,
+    pub modified: MetadataValue<Timestamp>,
     pub action: RestoreDestinationAction,
     pub verified: bool,
 }
@@ -2397,6 +2431,91 @@ fn write_restored_file(
     }
 
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestoredMetadataTarget {
+    RegularFile,
+    Directory,
+}
+
+fn apply_restored_modified_timestamp(
+    destination_path: &Path,
+    relative_path: &Path,
+    modified: &MetadataValue<Timestamp>,
+    target: RestoredMetadataTarget,
+    warnings: &mut Vec<RestoreMetadataWarning>,
+) -> usize {
+    let timestamp = match modified {
+        MetadataValue::Captured(timestamp) => timestamp,
+        MetadataValue::Unsupported => {
+            warnings.push(RestoreMetadataWarning {
+                relative_path: relative_path.to_path_buf(),
+                field: "modified",
+                reason: "modified timestamp was not captured".to_owned(),
+            });
+            return 0;
+        }
+        MetadataValue::Denied(reason) => {
+            warnings.push(RestoreMetadataWarning {
+                relative_path: relative_path.to_path_buf(),
+                field: "modified",
+                reason: format!("modified timestamp was denied during backup: {reason}"),
+            });
+            return 0;
+        }
+    };
+
+    let Some(modified_time) = system_time_from_timestamp(*timestamp) else {
+        warnings.push(RestoreMetadataWarning {
+            relative_path: relative_path.to_path_buf(),
+            field: "modified",
+            reason: "modified timestamp is outside the supported system time range".to_owned(),
+        });
+        return 0;
+    };
+
+    match set_restored_modified_timestamp(destination_path, target, modified_time) {
+        Ok(()) => 1,
+        Err(source) => {
+            warnings.push(RestoreMetadataWarning {
+                relative_path: relative_path.to_path_buf(),
+                field: "modified",
+                reason: format!("modified timestamp could not be applied: {source}"),
+            });
+            0
+        }
+    }
+}
+
+fn system_time_from_timestamp(timestamp: Timestamp) -> Option<SystemTime> {
+    if timestamp.nanoseconds >= 1_000_000_000 {
+        return None;
+    }
+
+    if timestamp.seconds >= 0 {
+        UNIX_EPOCH
+            .checked_add(Duration::from_secs(timestamp.seconds as u64))?
+            .checked_add(Duration::from_nanos(u64::from(timestamp.nanoseconds)))
+    } else {
+        UNIX_EPOCH
+            .checked_sub(Duration::from_secs(timestamp.seconds.unsigned_abs()))?
+            .checked_add(Duration::from_nanos(u64::from(timestamp.nanoseconds)))
+    }
+}
+
+fn set_restored_modified_timestamp(
+    destination_path: &Path,
+    target: RestoredMetadataTarget,
+    modified_time: SystemTime,
+) -> io::Result<()> {
+    let file = match target {
+        RestoredMetadataTarget::RegularFile => {
+            fs::OpenOptions::new().write(true).open(destination_path)?
+        }
+        RestoredMetadataTarget::Directory => fs::File::open(destination_path)?,
+    };
+    file.set_times(fs::FileTimes::new().set_modified(modified_time))
 }
 
 #[cfg(unix)]
@@ -3414,6 +3533,101 @@ mod tests {
             b"two"
         );
         assert!(!destination.path().join("skip.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn restore_snapshot_to_destination_applies_file_and_directory_modified_timestamps() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let source = tempfile::tempdir().expect("source tempdir");
+        let destination = tempfile::tempdir().expect("destination tempdir");
+        let docs = source.path().join("docs");
+        let file = docs.join("one.txt");
+        fs::create_dir(&docs).expect("create docs");
+        fs::write(&file, b"one").expect("write one");
+
+        let expected = Timestamp {
+            seconds: 1_700_000_000,
+            nanoseconds: 0,
+        };
+        let expected_time = system_time_from_timestamp(expected).expect("expected system time");
+        set_restored_modified_timestamp(&file, RestoredMetadataTarget::RegularFile, expected_time)
+            .expect("set source file mtime");
+        set_restored_modified_timestamp(&docs, RestoredMetadataTarget::Directory, expected_time)
+            .expect("set source directory mtime");
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+
+        let restored = pipeline
+            .restore_snapshot_to_destination(
+                &store,
+                &master_key,
+                RestoreDestinationRequest {
+                    snapshot_id: result.snapshot_id,
+                    paths: vec![PathBuf::from("docs")],
+                    destination: destination.path().to_path_buf(),
+                    overwrite: RestoreOverwritePolicy::FailIfExists,
+                    dry_run: false,
+                    verify: true,
+                },
+            )
+            .await
+            .expect("destination restore");
+
+        assert_eq!(restored.metadata_applied, 2);
+        assert_eq!(restored.metadata_warnings, Vec::new());
+        assert_eq!(
+            capture_metadata(destination.path().join("docs"))
+                .expect("restored directory metadata")
+                .modified,
+            MetadataValue::Captured(expected)
+        );
+        assert_eq!(
+            capture_metadata(destination.path().join("docs/one.txt"))
+                .expect("restored file metadata")
+                .modified,
+            MetadataValue::Captured(expected)
+        );
+    }
+
+    #[test]
+    fn apply_restored_modified_timestamp_records_warning_when_not_captured() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("sample.txt");
+        fs::write(&path, b"sample").expect("write sample");
+        let mut warnings = Vec::new();
+
+        let applied = apply_restored_modified_timestamp(
+            &path,
+            Path::new("sample.txt"),
+            &MetadataValue::Unsupported,
+            RestoredMetadataTarget::RegularFile,
+            &mut warnings,
+        );
+
+        assert_eq!(applied, 0);
+        assert_eq!(
+            warnings,
+            vec![RestoreMetadataWarning {
+                relative_path: PathBuf::from("sample.txt"),
+                field: "modified",
+                reason: "modified timestamp was not captured".to_owned(),
+            }]
+        );
     }
 
     #[cfg(unix)]

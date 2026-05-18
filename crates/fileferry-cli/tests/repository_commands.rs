@@ -1,6 +1,10 @@
 use assert_cmd::Command;
 use serde_json::Value;
-use std::fs;
+use std::{
+    fs,
+    path::Path,
+    time::{Duration, SystemTime},
+};
 
 fn fileferry() -> Command {
     let mut command = Command::cargo_bin("ferry").expect("ferry binary");
@@ -46,6 +50,15 @@ fn backup_source(repo_url: &str, passphrase: &str, source: &std::path::Path) -> 
         .clone();
 
     serde_json::from_slice(&output).expect("backup json")
+}
+
+fn set_modified_time(path: &Path, modified: SystemTime) {
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("open file for timestamp update");
+    file.set_times(fs::FileTimes::new().set_modified(modified))
+        .expect("set file modified time");
 }
 
 #[test]
@@ -105,6 +118,8 @@ fn restore_writes_file_bytes_from_committed_snapshot() {
     fs::write(source.join("sample.txt"), b"sample").expect("write sample");
     fs::create_dir(source.join("nested")).expect("create nested");
     fs::write(source.join("nested").join("keep.txt"), b"keep").expect("write nested");
+    let keep_modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    set_modified_time(&source.join("nested").join("keep.txt"), keep_modified);
     let backup = backup_source(&repo_url, passphrase, &source);
 
     let destination = temp.path().join("restore-tag");
@@ -144,13 +159,20 @@ fn restore_writes_file_bytes_from_committed_snapshot() {
     assert_eq!(restore["data"]["files_written"], 1);
     assert_eq!(restore["data"]["directories_written"], 0);
     assert_eq!(restore["data"]["symlinks_written"], 0);
-    assert_eq!(restore["data"]["metadata_applied"], 0);
+    assert_eq!(restore["data"]["metadata_applied"], 1);
     assert_eq!(restore["data"]["metadata_warnings"], serde_json::json!([]));
     assert_eq!(restore["data"]["bytes_written"], 4);
     assert_eq!(restore["data"]["verified_files"], 1);
     assert_eq!(
         fs::read(destination.join("nested").join("keep.txt")).expect("restored nested file"),
         b"keep"
+    );
+    assert_eq!(
+        fs::metadata(destination.join("nested").join("keep.txt"))
+            .expect("restored nested metadata")
+            .modified()
+            .expect("restored nested modified time"),
+        keep_modified
     );
     assert!(!destination.join("sample.txt").exists());
 
@@ -250,7 +272,7 @@ fn restore_writes_directory_entries_and_symlinks_from_committed_snapshot() {
     assert_eq!(restore["data"]["directories_written"], 3);
     assert_eq!(restore["data"]["files_written"], 1);
     assert_eq!(restore["data"]["symlinks_written"], 1);
-    assert_eq!(restore["data"]["metadata_applied"], 0);
+    assert_eq!(restore["data"]["metadata_applied"], 4);
     assert_eq!(restore["data"]["metadata_warnings"], serde_json::json!([]));
     assert!(destination.join("empty/nested").is_dir());
     assert_eq!(
@@ -332,6 +354,7 @@ fn restore_jsonl_emits_progress_events_without_stderr() {
     let completed: Value = serde_json::from_slice(lines[7]).expect("completed event");
     assert_eq!(completed["event"], "command_completed");
     assert_eq!(completed["data"]["files_written"], 1);
+    assert_eq!(completed["data"]["metadata_applied"], 2);
 }
 
 #[test]

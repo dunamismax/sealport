@@ -36,9 +36,11 @@ Last reviewed: 2026-05-18.
 - `ferry restore` opens initialized local repositories, unlocks with
   `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, selects snapshots by
   latest, snapshot id, or tag, restores all or path-scoped directory entries,
-  regular-file contents, and Unix symlinks through the core restore pipeline,
+  regular-file contents, Unix symlinks, and captured modified timestamps for
+  restored regular files and directories through the core restore pipeline,
   enforces destination fail-if-exists safety unless `--overwrite` is supplied
-  for regular files, supports dry-run reporting, and exposes tested human,
+  for regular files, supports dry-run reporting, returns partial-success exit
+  code `10` when metadata warnings are produced, and exposes tested human,
   JSON, and JSONL-safe output paths.
 - `ferry check` opens initialized local repositories, unlocks with
   `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed
@@ -78,9 +80,10 @@ Last reviewed: 2026-05-18.
 - `fileferry-core` has initial tested restore primitives for manifest
   timestamps, snapshot selection by id/tag/latest, and path-scoped regular-file
   content reassembly from encrypted chunks.
-- `fileferry-core` can restore regular-file content to a destination directory
-  with destination safety checks, explicit overwrite policy, dry-run reporting,
-  and optional byte-for-byte verification.
+- `fileferry-core` can restore directory entries, regular-file content, Unix
+  symlinks, and regular-file/directory modified timestamps to a destination
+  directory with destination safety checks, explicit overwrite policy, dry-run
+  reporting, and optional byte-for-byte verification.
 - `fileferry-core` writes commit markers after encrypted snapshot manifests,
   can discover committed manifests from those markers, and has tested snapshot
   summary and immediate-entry listing primitives for future `snapshots` and
@@ -93,7 +96,8 @@ Last reviewed: 2026-05-18.
   named `ferry`.
 
 The repo is still pre-v1. Restore is wired into the CLI for initialized local
-repositories, directory entries, regular-file contents, and Unix symlinks, but
+repositories, directory entries, regular-file contents, Unix symlinks, and
+modified timestamps for restored regular files and directories, but broader
 metadata application and S3-compatible repository bootstrap/restore are not
 complete. `ferry check` has a fixed full referenced-chunk verification path,
 but configurable subset checks are not complete. Describe backup, restore,
@@ -610,6 +614,17 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Added the first narrow restore metadata application slice for
+  initialized local repositories. `fileferry-core` now carries captured
+  modified timestamps through restore planning and applies them to restored
+  regular files and directories after content writes; symlink timestamps,
+  ownership, mode bits, ACLs, xattrs, resource forks, Windows attributes, BSD
+  flags, and other platform-specific metadata remain unimplemented. Restore
+  results now report `metadata_applied` from core, and metadata warning output
+  uses partial-success exit code `10` while preserving JSON/JSONL stdout and
+  stderr separation. Added core tests for successful file/directory timestamp
+  application and warning generation, CLI integration coverage for restored
+  file mtimes, and CLI unit coverage for partial-success warning output.
 - 2026-05-18 - Improved `ferry check` corruption diagnostics and
   machine-readable failure behavior without adding repair or subset-check
   claims. Authenticated-object decode and metadata decode errors now retain the

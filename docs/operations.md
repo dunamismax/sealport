@@ -18,6 +18,8 @@ Scope:
   reported `verified_files: 1`; `test -d` verified the restored empty nested
   directory; `readlink` verified the restored symlink target; `ferry check`
   authenticated the committed manifest, chunk index, and referenced chunk.
+  This drill predates modified-timestamp restore coverage and did not verify
+  metadata application.
 
 Result:
 
@@ -56,6 +58,7 @@ test -d "$restore/empty/nested"
 test "$(readlink "$restore/sample.link")" = 'sample.txt'
 ```
 
-This drill does not claim S3-compatible restore coverage, metadata
-application, configurable check subset coverage, or symlink restore behavior
-on non-Unix platforms.
+This drill does not claim S3-compatible restore coverage, metadata application
+coverage, configurable check subset coverage, or symlink restore behavior on
+non-Unix platforms. Current code has separate tests for restored regular-file
+and directory modified timestamps.
