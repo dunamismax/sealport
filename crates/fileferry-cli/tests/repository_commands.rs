@@ -430,6 +430,105 @@ fn restore_requires_correct_password_and_safe_destination() {
 }
 
 #[test]
+fn restore_json_failure_reports_missing_requested_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(source.join("sample.txt"), b"sample").expect("write sample");
+    backup_source(&repo_url, passphrase, &source);
+
+    let destination = temp.path().join("restore");
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "restore",
+            "--path",
+            "missing.txt",
+            destination.to_str().expect("destination path"),
+        ])
+        .assert()
+        .code(7)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let failure: Value = serde_json::from_slice(&output).expect("restore failure json");
+
+    assert_eq!(failure["command"], "restore");
+    assert_eq!(failure["status"], "failure");
+    assert_eq!(failure["data"]["code"], "snapshot_path_not_found");
+    assert_eq!(failure["data"]["exit_code"], 7);
+    assert_eq!(failure["data"]["path"], serde_json::json!("missing.txt"));
+    assert!(!destination.exists());
+}
+
+#[test]
+fn restore_jsonl_failure_reports_missing_referenced_chunk_without_destination_writes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(source.join("sample.txt"), b"sample").expect("write sample");
+    backup_source(&repo_url, passphrase, &source);
+    let chunk_path = find_first_file(repo.join("objects/chunk"));
+    fs::remove_file(&chunk_path).expect("remove chunk");
+
+    let destination = temp.path().join("restore");
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--jsonl",
+            "restore",
+            destination.to_str().expect("destination path"),
+        ])
+        .assert()
+        .code(6)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let lines: Vec<_> = output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    let started: Value = serde_json::from_slice(lines[0]).expect("started event");
+    assert_eq!(started["event"], "command_started");
+    assert_eq!(started["command"], "restore");
+
+    let failed: Value = serde_json::from_slice(lines[1]).expect("failed event");
+    assert_eq!(failed["event"], "command_failed");
+    assert_eq!(failed["command"], "restore");
+    assert_eq!(failed["status"], "failure");
+    assert_eq!(
+        failed["data"]["code"],
+        "repository_referenced_object_missing"
+    );
+    assert_eq!(failed["data"]["exit_code"], 6);
+    assert!(
+        failed["data"]["object_key"]
+            .as_str()
+            .expect("object key")
+            .starts_with("objects/chunk/")
+    );
+    assert!(!destination.exists());
+}
+
+#[test]
 fn check_verifies_initialized_local_repository() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
@@ -711,6 +810,74 @@ fn repository_open_failures_are_structured_and_redacted_in_machine_modes() {
     assert_eq!(failed["event"], "command_failed");
     assert_eq!(failed["data"]["code"], "repository_bootstrap_decode_failed");
     assert_eq!(failed["data"]["exit_code"], 6);
+}
+
+#[test]
+fn repository_open_reports_unsupported_bootstrap_version_and_features_as_incompatible() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let passphrase = "test-passphrase";
+
+    let version_repo = temp.path().join("version-repo");
+    let version_repo_url = version_repo.display().to_string();
+    init_repo(&version_repo_url, passphrase);
+    let mut bootstrap: Value =
+        serde_json::from_slice(&fs::read(version_repo.join("bootstrap")).expect("bootstrap bytes"))
+            .expect("bootstrap json");
+    bootstrap["format_version"] = serde_json::json!(999);
+    fs::write(
+        version_repo.join("bootstrap"),
+        serde_json::to_vec(&bootstrap).expect("unsupported version json"),
+    )
+    .expect("write unsupported version");
+    let version_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &version_repo_url, "--json", "snapshots"])
+        .assert()
+        .code(3)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let version_failure: Value =
+        serde_json::from_slice(&version_output).expect("version failure json");
+    assert_eq!(version_failure["command"], "snapshots");
+    assert_eq!(version_failure["status"], "failure");
+    assert_eq!(
+        version_failure["data"]["code"],
+        "repository_format_unsupported"
+    );
+    assert_eq!(version_failure["data"]["exit_code"], 3);
+
+    let feature_repo = temp.path().join("feature-repo");
+    let feature_repo_url = feature_repo.display().to_string();
+    init_repo(&feature_repo_url, passphrase);
+    let mut bootstrap: Value =
+        serde_json::from_slice(&fs::read(feature_repo.join("bootstrap")).expect("bootstrap bytes"))
+            .expect("bootstrap json");
+    bootstrap["features"] = serde_json::json!(["future-feature"]);
+    fs::write(
+        feature_repo.join("bootstrap"),
+        serde_json::to_vec(&bootstrap).expect("unsupported feature json"),
+    )
+    .expect("write unsupported feature");
+    let feature_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &feature_repo_url, "--jsonl", "check"])
+        .assert()
+        .code(3)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let lines: Vec<_> = feature_output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    let failed: Value = serde_json::from_slice(lines[1]).expect("feature failed event");
+    assert_eq!(failed["event"], "command_failed");
+    assert_eq!(failed["data"]["code"], "repository_features_unsupported");
+    assert_eq!(failed["data"]["exit_code"], 3);
 }
 
 #[test]

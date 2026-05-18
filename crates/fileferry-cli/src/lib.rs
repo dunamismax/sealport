@@ -250,7 +250,9 @@ impl RepositoryError {
 fn core_exit_code(error: &CoreError) -> i32 {
     match error {
         CoreError::Storage { source } => storage_exit_code(source),
-        CoreError::RepositoryNotInitialized => 3,
+        CoreError::RepositoryNotInitialized
+        | CoreError::UnsupportedRepositoryFormat { .. }
+        | CoreError::UnsupportedRepositoryFeatures => 3,
         CoreError::RepositoryUnlock { .. } => 4,
         CoreError::SnapshotNotFound { .. } | CoreError::SnapshotPathNotFound { .. } => 7,
         CoreError::RepositoryBootstrapDecode { .. }
@@ -844,6 +846,8 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::RepositoryBootstrapDecode { .. } => "repository_bootstrap_decode_failed",
         CoreError::RepositoryNotInitialized => "repository_not_initialized",
         CoreError::InvalidRepositoryBootstrap { .. } => "repository_bootstrap_invalid",
+        CoreError::UnsupportedRepositoryFormat { .. } => "repository_format_unsupported",
+        CoreError::UnsupportedRepositoryFeatures => "repository_features_unsupported",
         CoreError::RepositoryUnlock { .. } => "repository_unlock_failed",
         CoreError::SnapshotNotFound { .. } => "snapshot_not_found",
         CoreError::SnapshotPathNotFound { .. } => "snapshot_path_not_found",

@@ -34,6 +34,9 @@ These exit code families are stable for the current CLI foundation:
 
 The current implementation can emit these families for the implemented command
 surface: `0`, `1`, `2`, `3`, `4`, `5`, `6`, `7`, `9`, and `10`.
+Unsupported repository format versions and declared repository features are
+reported as incompatible repository failures in family `3`, not as corruption
+or tampering failures.
 
 ## Global Precedence
 
@@ -466,12 +469,14 @@ CLI.
 or accepts `--snapshot <ID>` / `--tag <TAG>` / `--latest`, and restores
 directory entries, regular-file contents, and Unix symlinks under the
 destination directory. `--path <PATH>` may be repeated to restore
-snapshot-relative paths. The command fails if a destination file already
-exists unless `--overwrite` is supplied. Restored symlink destination paths and
-symlinked ancestors are rejected if they already exist; symlinks are created
-after directory and regular-file writes so restore writes do not traverse
-newly restored symlinks. `--dry-run` reports selected entries and planned
-writes without creating destination entries. It also reports
+snapshot-relative paths. If any requested snapshot-relative path matches no
+manifest entry, the command fails with exit code `7` before destination
+writes. The command fails if a destination file already exists unless
+`--overwrite` is supplied. Restored symlink destination paths and symlinked
+ancestors are rejected if they already exist; symlinks are created after
+directory and regular-file writes so restore writes do not traverse newly
+restored symlinks. `--dry-run` reports selected entries and planned writes
+without creating destination entries. It also reports
 `metadata_planned`, the count of regular-file and directory modified timestamp
 fields selected for restore. JSON output follows the Restore data schema
 above; JSONL output emits the implemented progress phases listed above.

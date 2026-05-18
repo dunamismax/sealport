@@ -159,6 +159,12 @@ pub enum CoreError {
     #[error("repository bootstrap is invalid: {reason}")]
     InvalidRepositoryBootstrap { reason: &'static str },
 
+    #[error("repository format version {format_version} is not supported")]
+    UnsupportedRepositoryFormat { format_version: u16 },
+
+    #[error("repository uses unsupported features")]
+    UnsupportedRepositoryFeatures,
+
     #[error("repository could not be unlocked")]
     RepositoryUnlock {
         #[source]
@@ -576,8 +582,8 @@ impl RepositoryBootstrap {
             });
         }
         if self.format_version != REPOSITORY_FORMAT_VERSION_V0 {
-            return Err(CoreError::InvalidRepositoryBootstrap {
-                reason: "repository format version is not supported",
+            return Err(CoreError::UnsupportedRepositoryFormat {
+                format_version: self.format_version,
             });
         }
         if self.repository_id.len() != REPOSITORY_ID_BYTES * 2
@@ -596,9 +602,7 @@ impl RepositoryBootstrap {
             });
         }
         if !self.features.is_empty() {
-            return Err(CoreError::InvalidRepositoryBootstrap {
-                reason: "repository uses unsupported features",
-            });
+            return Err(CoreError::UnsupportedRepositoryFeatures);
         }
         Ok(())
     }
@@ -1399,6 +1403,7 @@ impl BackupPipeline {
             .await
             .map_err(|error| referenced_object_read_error(error, expected_manifest_object))?;
         let scoped_entries = scoped_manifest_entries(&manifest, &restore_paths);
+        ensure_restore_paths_exist(&manifest, &restore_paths)?;
         let selected_entries = scoped_entries.len();
         let chunk_index = self
             .load_chunk_index_entries(store, master_key, &manifest)
@@ -2623,6 +2628,28 @@ fn scoped_manifest_entries<'a>(
         .collect()
 }
 
+fn ensure_restore_paths_exist(
+    manifest: &SnapshotManifest,
+    restore_paths: &[PathBuf],
+) -> CoreResult<()> {
+    for restore_path in restore_paths {
+        if manifest.body.entries.iter().any(|entry| {
+            restore_path.as_os_str().is_empty()
+                || entry.relative_path == *restore_path
+                || entry.relative_path.starts_with(restore_path)
+        }) {
+            continue;
+        }
+
+        return Err(CoreError::SnapshotPathNotFound {
+            snapshot_id: manifest.snapshot_id.clone(),
+            path: restore_path.clone(),
+        });
+    }
+
+    Ok(())
+}
+
 fn snapshot_entry_from_manifest(entry: &ManifestEntry) -> SnapshotEntry {
     SnapshotEntry {
         relative_path: entry.relative_path.clone(),
@@ -2912,6 +2939,67 @@ mod tests {
             .await
             .expect_err("wrong passphrase fails");
         assert!(matches!(error, CoreError::RepositoryUnlock { .. }));
+    }
+
+    #[tokio::test]
+    async fn repository_bootstrap_reports_unsupported_format_and_features() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let passphrase = SecretString::from("correct");
+        let version_store = FakeObjectStore::new();
+        create_repository(&version_store, &passphrase, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let bootstrap_key = bootstrap_object_key().expect("bootstrap key");
+        let mut bootstrap: serde_json::Value = serde_json::from_slice(
+            &version_store
+                .get(&bootstrap_key)
+                .await
+                .expect("bootstrap bytes"),
+        )
+        .expect("bootstrap json");
+        bootstrap["format_version"] = serde_json::json!(999);
+        version_store
+            .overwrite_for_tests(
+                bootstrap_key.clone(),
+                serde_json::to_vec(&bootstrap).expect("unsupported format json"),
+            )
+            .await;
+        let version_error = open_repository(&version_store, &passphrase)
+            .await
+            .expect_err("unsupported format should fail");
+        assert!(matches!(
+            version_error,
+            CoreError::UnsupportedRepositoryFormat {
+                format_version: 999
+            }
+        ));
+
+        let feature_store = FakeObjectStore::new();
+        create_repository(&feature_store, &passphrase, KdfParams::for_tests())
+            .await
+            .expect("create repository");
+        let mut bootstrap: serde_json::Value = serde_json::from_slice(
+            &feature_store
+                .get(&bootstrap_key)
+                .await
+                .expect("bootstrap bytes"),
+        )
+        .expect("bootstrap json");
+        bootstrap["features"] = serde_json::json!(["future-feature"]);
+        feature_store
+            .overwrite_for_tests(
+                bootstrap_key,
+                serde_json::to_vec(&bootstrap).expect("unsupported features json"),
+            )
+            .await;
+        let feature_error = open_repository(&feature_store, &passphrase)
+            .await
+            .expect_err("unsupported features should fail");
+        assert!(matches!(
+            feature_error,
+            CoreError::UnsupportedRepositoryFeatures
+        ));
     }
 
     #[tokio::test]
@@ -3532,6 +3620,49 @@ mod tests {
             ]
         );
         assert!(restored.selected_entries >= restored.files.len());
+    }
+
+    #[tokio::test]
+    async fn restore_snapshot_contents_rejects_missing_requested_paths() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(temp.path().join("docs")).expect("create docs");
+        fs::write(temp.path().join("docs/one.txt"), b"one").expect("write one");
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![temp.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+
+        let error = pipeline
+            .restore_snapshot_contents(
+                &store,
+                &master_key,
+                RestoreContentRequest {
+                    snapshot_id: result.snapshot_id.clone(),
+                    paths: vec![PathBuf::from("docs"), PathBuf::from("missing.txt")],
+                },
+            )
+            .await
+            .expect_err("missing restore path should fail");
+
+        assert!(matches!(
+            error,
+            CoreError::SnapshotPathNotFound { snapshot_id, path }
+                if snapshot_id == result.snapshot_id && path == Path::new("missing.txt")
+        ));
     }
 
     #[tokio::test]

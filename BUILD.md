@@ -39,10 +39,12 @@ Last reviewed: 2026-05-18.
   regular-file contents, Unix symlinks, and captured modified timestamps for
   restored regular files and directories through the core restore pipeline,
   enforces destination fail-if-exists safety unless `--overwrite` is supplied
-  for regular files, supports dry-run reporting including planned modified
-  timestamp metadata and timestamp planning warnings, returns partial-success
-  exit code `10` when metadata warnings are produced, and exposes tested
-  human, JSON, and JSONL-safe output paths.
+  for regular files, rejects requested snapshot-relative restore paths that do
+  not match manifest entries before destination writes, supports dry-run
+  reporting including planned modified timestamp metadata and timestamp
+  planning warnings, returns partial-success exit code `10` when metadata
+  warnings are produced, and exposes tested human, JSON, and JSONL-safe output
+  paths.
 - `ferry check` opens initialized local repositories, unlocks with
   `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed
   manifests and chunk indexes, reads/decompresses every referenced chunk, and
@@ -619,6 +621,20 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Tightened restore and repository-incompatibility failure
+  behavior without broadening command scope. `fileferry-core` now rejects any
+  requested restore `--path` that matches no manifest entry before destination
+  writes, and `fileferry-cli` reports that as `snapshot_path_not_found` with
+  exit code `7` in machine output. Restore JSONL coverage now proves missing
+  referenced chunks fail with an integrity envelope before destination writes.
+  Unsupported repository format versions and declared repository features now
+  have explicit core error classes and CLI failure codes mapped to the
+  incompatible-repository exit family `3`, while malformed bootstrap JSON
+  remains an integrity failure. Documented the behavior in
+  `docs/cli-contract.md`. Verified initially with targeted `cargo test -p
+  fileferry-core ...` and `cargo test -p fileferry-cli ...` commands, then
+  with the full `just fmt`, `just check`, `just test`, `just build`, and
+  `git diff --check` gate.
 - 2026-05-18 - Tightened local repository open/check diagnostics without
   broadening command scope. `fileferry-core` now reports missing objects
   referenced by committed repository metadata as integrity failures outside
