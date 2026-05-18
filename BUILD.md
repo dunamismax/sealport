@@ -25,6 +25,10 @@ Last reviewed: 2026-05-18.
 - CLI config discovery, profiles, environment precedence, redacted
   diagnostics, and machine-output envelopes exist for the current command
   surface.
+- Format v0 security and repository-format design docs exist.
+- `sealport-crypto` has initial tested primitives for master-key creation,
+  passphrase key-slot unlock, HKDF subkeys, and XChaCha20-Poly1305 object
+  envelopes.
 - The initial product brief has been distilled into `README.md`,
   `BUILD.md`, and `AGENTS.md`.
 - The product target is an all-Rust, cross-platform, encrypted backup CLI
@@ -106,13 +110,13 @@ Required v1 security properties:
 
 Security design work before format freeze:
 
-- [ ] Choose AEAD and key hierarchy, then document rationale.
-- [ ] Define repository bootstrap plaintext and justify every field.
-- [ ] Define KDF parameters, migration story, and unlock UX.
-- [ ] Define recovery export format and user warning text.
-- [ ] Define key rotation semantics and what rotation does not rewrite.
-- [ ] Define tamper/corruption error classes and JSON output.
-- [ ] Add `docs/security.md`.
+- [x] Choose AEAD and key hierarchy, then document rationale.
+- [x] Define repository bootstrap plaintext and justify every field.
+- [x] Define KDF parameters, migration story, and unlock UX.
+- [x] Define recovery export format and user warning text.
+- [x] Define key rotation semantics and what rotation does not rewrite.
+- [x] Define tamper/corruption error classes and JSON output.
+- [x] Add `docs/security.md`.
 - [ ] Add adversarial tests for wrong password, wrong key, bit flips, truncated
       objects, swapped objects, replayed indexes, and malformed metadata.
 
@@ -142,15 +146,15 @@ Repository design goals:
 
 Repository format work:
 
-- [ ] Write `docs/repository-format.md` before committing to object bytes.
-- [ ] Define object naming without leaking source paths.
-- [ ] Define object authentication context and domain separation.
-- [ ] Define snapshot manifest structure.
-- [ ] Define chunk index structure.
-- [ ] Define commit markers and upload state.
-- [ ] Define repository lock or lease model, if any.
-- [ ] Define concurrent backup behavior.
-- [ ] Define prune mark, sweep, and recovery behavior.
+- [x] Write `docs/repository-format.md` before committing to object bytes.
+- [x] Define object naming without leaking source paths.
+- [x] Define object authentication context and domain separation.
+- [x] Define snapshot manifest structure.
+- [x] Define chunk index structure.
+- [x] Define commit markers and upload state.
+- [x] Define repository lock or lease model, if any.
+- [x] Define concurrent backup behavior.
+- [x] Define prune mark, sweep, and recovery behavior.
 - [ ] Add golden fixtures after the first format version is intentionally
       frozen.
 
@@ -297,8 +301,8 @@ Minimum v1 bar:
 - [ ] Key add/remove/rotate/export-recovery paths exist and are tested.
 - [ ] Local backend passes interruption and corruption tests.
 - [ ] S3-compatible backend passes retry, resume, and eventual-weirdness tests.
-- [ ] Stable config profiles and environment variables exist.
-- [ ] Shell completions are generated.
+- [x] Stable config profiles and environment variables exist.
+- [x] Shell completions are generated.
 - [ ] Exit codes, JSON, and JSONL schemas are documented and tested.
 - [ ] Platform metadata behavior is documented and tested on every supported
       platform.
@@ -348,12 +352,12 @@ where documented verification passes on a clean checkout.
 
 ### Phase 3 - Crypto And Format Design
 
-- [ ] Write `docs/security.md`.
-- [ ] Write `docs/repository-format.md`.
-- [ ] Choose AEAD, KDF parameters, and key hierarchy.
-- [ ] Implement master key creation and unlock.
-- [ ] Implement encrypted object envelope.
-- [ ] Add corruption and wrong-key tests.
+- [x] Write `docs/security.md`.
+- [x] Write `docs/repository-format.md`.
+- [x] Choose AEAD, KDF parameters, and key hierarchy.
+- [x] Implement master key creation and unlock.
+- [x] Implement encrypted object envelope.
+- [x] Add corruption and wrong-key tests.
 - [ ] Freeze repository format version `0` only after fixtures exist.
 
 ### Phase 4 - Storage Backends
@@ -519,6 +523,12 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Completed the first Phase 3 slice: documented format v0
+  security choices and repository-format structure, selected Argon2id,
+  HKDF-SHA-256, and XChaCha20-Poly1305, implemented tested master-key
+  creation/unlock, passphrase key slots, subkey derivation, and authenticated
+  object envelopes in `sealport-crypto`. Verified with `cargo test -p
+  sealport-crypto`.
 - 2026-05-18 - Completed the Phase 2 CLI foundation: config discovery,
   profiles, CLI/env/config precedence, typed config validation, redacted
   diagnostics, JSON and JSONL envelopes, event names, shell completions, and

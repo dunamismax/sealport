@@ -324,8 +324,10 @@ V1 should not include:
 ## Development
 
 The repo contains the initial Rust workspace, crate boundaries, CLI shell, CI
-workflow, and planning docs. The backup engine, repository format, storage
-backends, and crypto implementation are not built yet.
+workflow, planning docs, and first tested crypto primitives for master keys,
+passphrase key slots, subkey derivation, and authenticated object envelopes.
+The backup engine, frozen repository format, and storage backends are not built
+yet.
 
 The normal local gate is:
 
@@ -344,7 +346,10 @@ git diff --check
 
 Durable implementation details should move into `docs/` as they settle,
 especially architecture, repository format, security, CLI/JSON contracts,
-storage behavior, platform metadata, operations, and release process.
+storage behavior, platform metadata, operations, and release process. Current
+design docs include [`docs/security.md`](docs/security.md),
+[`docs/repository-format.md`](docs/repository-format.md), and
+[`docs/cli-contract.md`](docs/cli-contract.md).
 
 ## License
 
