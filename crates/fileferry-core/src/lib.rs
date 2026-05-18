@@ -11,9 +11,11 @@ use fileferry_platform::{EntryKind, EntryMetadata, PlatformError, capture_metada
 use fileferry_storage::{ObjectKey, ObjectStore, PutStatus, StorageError};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     fs, io,
+    path::Component,
     path::{Path, PathBuf},
+    time::{SystemTime, SystemTimeError, UNIX_EPOCH},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -72,6 +74,22 @@ pub enum CoreError {
         source: io::Error,
     },
 
+    #[error("chunk {chunk_id} could not be decompressed")]
+    Decompression {
+        chunk_id: String,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("chunk {chunk_id} has an invalid length")]
+    InvalidChunkLength { chunk_id: String },
+
+    #[error("chunk {chunk_id} is missing from the loaded indexes")]
+    MissingChunkIndexEntry { chunk_id: String },
+
+    #[error("restored chunk identity mismatch: expected {expected}, found {actual}")]
+    ChunkIdentityMismatch { expected: String, actual: String },
+
     #[error("repository object could not be encrypted")]
     Encryption {
         #[source]
@@ -101,6 +119,18 @@ pub enum CoreError {
         kind: &'static str,
         expected: String,
         actual: String,
+    },
+
+    #[error("snapshot selection {selection} did not match any loaded snapshot")]
+    SnapshotNotFound { selection: String },
+
+    #[error("restore request is invalid: {reason}")]
+    InvalidRestoreRequest { reason: &'static str },
+
+    #[error("system clock is before the Unix epoch")]
+    SystemClock {
+        #[source]
+        source: SystemTimeError,
     },
 
     #[error("repository object key could not be created")]
@@ -511,6 +541,7 @@ impl BackupPipeline {
             .await?;
 
         let manifest_body = SnapshotManifestBody {
+            created_at_unix_seconds: current_unix_seconds()?,
             tags: request.tags,
             entries: manifest_entries,
             index_ids: vec![index_id.clone()],
@@ -626,6 +657,125 @@ impl BackupPipeline {
 
         Ok(index)
     }
+
+    pub async fn restore_snapshot_contents(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        request: RestoreContentRequest,
+    ) -> CoreResult<RestoreContentResult> {
+        let restore_paths = normalize_restore_paths(&request.paths)?;
+        let manifest = self
+            .read_snapshot_manifest(store, master_key, &request.snapshot_id)
+            .await?;
+        let scoped_entries = scoped_manifest_entries(&manifest, &restore_paths);
+        let selected_entries = scoped_entries.len();
+        let chunk_index = self
+            .load_chunk_index_entries(store, master_key, &manifest)
+            .await?;
+        let repository_context = self.config.repository_id.as_bytes();
+        let chunk_key = master_key
+            .derive_subkey(KeyPurpose::ChunkData, repository_context)
+            .map_err(|source| CoreError::Encryption { source })?;
+        let mut files = Vec::new();
+
+        for entry in scoped_entries {
+            if entry.metadata.kind != EntryKind::RegularFile {
+                continue;
+            }
+
+            let mut contents = Vec::new();
+            for chunk in &entry.chunks {
+                let indexed = chunk_index.get(&chunk.chunk_id).ok_or_else(|| {
+                    CoreError::MissingChunkIndexEntry {
+                        chunk_id: chunk.chunk_id.clone(),
+                    }
+                })?;
+                if indexed.object_key != chunk.object_key
+                    || indexed.plaintext_length != chunk.length
+                    || indexed.compression != CompressionAlgorithm::Zstd
+                {
+                    return Err(CoreError::InvalidChunkLength {
+                        chunk_id: chunk.chunk_id.clone(),
+                    });
+                }
+
+                let object_key = ObjectKey::new(chunk.object_key.clone())
+                    .map_err(|source| CoreError::ObjectKey { source })?;
+                let encrypted = store
+                    .get(&object_key)
+                    .await
+                    .map_err(|source| CoreError::Storage { source })?;
+                let compressed = decrypt_repository_object(
+                    &chunk_key,
+                    ObjectKind::Chunk,
+                    &object_key,
+                    &encrypted,
+                )?;
+                let expected_len = usize::try_from(indexed.plaintext_length).map_err(|_| {
+                    CoreError::InvalidChunkLength {
+                        chunk_id: chunk.chunk_id.clone(),
+                    }
+                })?;
+                let plaintext =
+                    zstd::bulk::decompress(&compressed, expected_len).map_err(|source| {
+                        CoreError::Decompression {
+                            chunk_id: chunk.chunk_id.clone(),
+                            source,
+                        }
+                    })?;
+                if plaintext.len() != expected_len {
+                    return Err(CoreError::InvalidChunkLength {
+                        chunk_id: chunk.chunk_id.clone(),
+                    });
+                }
+                let actual = hex_bytes(
+                    &keyed_content_id(
+                        master_key,
+                        KeyPurpose::ChunkIdentity,
+                        repository_context,
+                        &plaintext,
+                    )
+                    .map_err(|source| CoreError::Encryption { source })?,
+                );
+                if actual != chunk.chunk_id {
+                    return Err(CoreError::ChunkIdentityMismatch {
+                        expected: chunk.chunk_id.clone(),
+                        actual,
+                    });
+                }
+
+                contents.extend_from_slice(&plaintext);
+            }
+
+            files.push(RestoredFile {
+                relative_path: entry.relative_path.clone(),
+                contents,
+            });
+        }
+
+        Ok(RestoreContentResult {
+            snapshot_id: manifest.snapshot_id,
+            selected_entries,
+            files,
+        })
+    }
+
+    async fn load_chunk_index_entries(
+        &self,
+        store: &dyn ObjectStore,
+        master_key: &MasterKey,
+        manifest: &SnapshotManifest,
+    ) -> CoreResult<BTreeMap<String, ChunkIndexEntry>> {
+        let mut entries = BTreeMap::new();
+        for index_id in &manifest.body.index_ids {
+            let index = self.read_chunk_index(store, master_key, index_id).await?;
+            for entry in index.chunks {
+                entries.insert(entry.chunk_id.clone(), entry);
+            }
+        }
+        Ok(entries)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -638,6 +788,69 @@ pub struct SnapshotWriteResult {
     pub chunks: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SnapshotSelection {
+    Id(String),
+    Tag(String),
+    Latest,
+}
+
+impl SnapshotSelection {
+    fn label(&self) -> String {
+        match self {
+            Self::Id(snapshot_id) => format!("id:{snapshot_id}"),
+            Self::Tag(tag) => format!("tag:{tag}"),
+            Self::Latest => "latest".to_owned(),
+        }
+    }
+}
+
+pub fn select_snapshot<'a>(
+    manifests: &'a [SnapshotManifest],
+    selection: &SnapshotSelection,
+) -> CoreResult<&'a SnapshotManifest> {
+    let selected = match selection {
+        SnapshotSelection::Id(snapshot_id) => manifests
+            .iter()
+            .find(|manifest| manifest.snapshot_id == *snapshot_id),
+        SnapshotSelection::Tag(tag) => manifests
+            .iter()
+            .filter(|manifest| manifest.body.tags.iter().any(|candidate| candidate == tag))
+            .max_by(snapshot_order),
+        SnapshotSelection::Latest => manifests.iter().max_by(snapshot_order),
+    };
+
+    selected.ok_or_else(|| CoreError::SnapshotNotFound {
+        selection: selection.label(),
+    })
+}
+
+fn snapshot_order(left: &&SnapshotManifest, right: &&SnapshotManifest) -> std::cmp::Ordering {
+    left.body
+        .created_at_unix_seconds
+        .cmp(&right.body.created_at_unix_seconds)
+        .then_with(|| left.snapshot_id.cmp(&right.snapshot_id))
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RestoreContentRequest {
+    pub snapshot_id: String,
+    pub paths: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoreContentResult {
+    pub snapshot_id: String,
+    pub selected_entries: usize,
+    pub files: Vec<RestoredFile>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoredFile {
+    pub relative_path: PathBuf,
+    pub contents: Vec<u8>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct SnapshotManifest {
     pub schema_version: u16,
@@ -647,6 +860,7 @@ pub struct SnapshotManifest {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct SnapshotManifestBody {
+    pub created_at_unix_seconds: u64,
     pub tags: Vec<String>,
     pub entries: Vec<ManifestEntry>,
     pub index_ids: Vec<String>,
@@ -794,6 +1008,62 @@ fn encode_encrypted_object(encrypted: EncryptedObject) -> CoreResult<Vec<u8>> {
         ciphertext: encrypted.ciphertext,
     })
     .map_err(|source| CoreError::Serialization { source })
+}
+
+fn current_unix_seconds() -> CoreResult<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|source| CoreError::SystemClock { source })
+}
+
+fn normalize_restore_paths(paths: &[PathBuf]) -> CoreResult<Vec<PathBuf>> {
+    paths
+        .iter()
+        .map(|path| normalize_restore_path(path))
+        .collect()
+}
+
+fn normalize_restore_path(path: &Path) -> CoreResult<PathBuf> {
+    let mut normalized = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(segment) => normalized.push(segment),
+            Component::ParentDir => {
+                return Err(CoreError::InvalidRestoreRequest {
+                    reason: "restore paths must not contain parent directory components",
+                });
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(CoreError::InvalidRestoreRequest {
+                    reason: "restore paths must be relative to the snapshot root",
+                });
+            }
+        }
+    }
+
+    Ok(normalized)
+}
+
+fn scoped_manifest_entries<'a>(
+    manifest: &'a SnapshotManifest,
+    restore_paths: &[PathBuf],
+) -> Vec<&'a ManifestEntry> {
+    manifest
+        .body
+        .entries
+        .iter()
+        .filter(|entry| {
+            restore_paths.is_empty()
+                || restore_paths.iter().any(|path| {
+                    path.as_os_str().is_empty()
+                        || entry.relative_path == *path
+                        || entry.relative_path.starts_with(path)
+                })
+        })
+        .collect()
 }
 
 fn content_id_for_metadata<T: Serialize>(
@@ -1232,6 +1502,111 @@ mod tests {
         assert_eq!(index.chunks.len(), result.chunks);
     }
 
+    #[test]
+    fn snapshot_selection_supports_id_tag_and_latest() {
+        let first = test_manifest("snap-a", 10, &["work"]);
+        let second = test_manifest("snap-b", 20, &["home"]);
+        let third = test_manifest("snap-c", 30, &["work"]);
+        let manifests = vec![first, second, third];
+
+        assert_eq!(
+            select_snapshot(&manifests, &SnapshotSelection::Id("snap-b".to_owned()))
+                .expect("select id")
+                .snapshot_id,
+            "snap-b"
+        );
+        assert_eq!(
+            select_snapshot(&manifests, &SnapshotSelection::Tag("work".to_owned()))
+                .expect("select tag")
+                .snapshot_id,
+            "snap-c"
+        );
+        assert_eq!(
+            select_snapshot(&manifests, &SnapshotSelection::Latest)
+                .expect("select latest")
+                .snapshot_id,
+            "snap-c"
+        );
+        assert!(matches!(
+            select_snapshot(&manifests, &SnapshotSelection::Tag("missing".to_owned())),
+            Err(CoreError::SnapshotNotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn restore_snapshot_contents_filters_paths_and_reassembles_files() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(temp.path().join("docs")).expect("create docs");
+        fs::create_dir(temp.path().join("logs")).expect("create logs");
+        fs::write(temp.path().join("docs/one.txt"), b"one").expect("write one");
+        fs::write(temp.path().join("docs/two.txt"), b"two").expect("write two");
+        fs::write(temp.path().join("logs/skip.txt"), b"skip").expect("write skip");
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![temp.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+
+        let restored = pipeline
+            .restore_snapshot_contents(
+                &store,
+                &master_key,
+                RestoreContentRequest {
+                    snapshot_id: result.snapshot_id.clone(),
+                    paths: vec![PathBuf::from("docs")],
+                },
+            )
+            .await
+            .expect("restore contents");
+
+        assert_eq!(restored.snapshot_id, result.snapshot_id);
+        assert_eq!(
+            restored
+                .files
+                .iter()
+                .map(|file| (file.relative_path.clone(), file.contents.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (PathBuf::from("docs/one.txt"), b"one".to_vec()),
+                (PathBuf::from("docs/two.txt"), b"two".to_vec()),
+            ]
+        );
+        assert!(restored.selected_entries >= restored.files.len());
+    }
+
+    #[tokio::test]
+    async fn restore_snapshot_contents_rejects_unsafe_restore_paths() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let pipeline = small_test_pipeline();
+        let error = pipeline
+            .restore_snapshot_contents(
+                &FakeObjectStore::new(),
+                &MasterKey::generate(),
+                RestoreContentRequest {
+                    snapshot_id: "snapshot".to_owned(),
+                    paths: vec![PathBuf::from("../outside")],
+                },
+            )
+            .await
+            .expect_err("unsafe restore path");
+
+        assert!(matches!(error, CoreError::InvalidRestoreRequest { .. }));
+    }
+
     #[tokio::test]
     async fn repository_object_reads_fail_closed_for_wrong_key_bit_flips_truncation_and_swaps() {
         use fileferry_testkit::FakeObjectStore;
@@ -1537,5 +1912,22 @@ mod tests {
 
         let error = result.expect_err("unreadable file should fail backup");
         assert!(matches!(error, CoreError::FileRead { .. }));
+    }
+
+    fn test_manifest(
+        snapshot_id: &str,
+        created_at_unix_seconds: u64,
+        tags: &[&str],
+    ) -> SnapshotManifest {
+        SnapshotManifest {
+            schema_version: 0,
+            snapshot_id: snapshot_id.to_owned(),
+            body: SnapshotManifestBody {
+                created_at_unix_seconds,
+                tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+                entries: Vec::new(),
+                index_ids: Vec::new(),
+            },
+        }
     }
 }

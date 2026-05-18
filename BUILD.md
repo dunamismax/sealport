@@ -51,6 +51,9 @@ Last reviewed: 2026-05-18.
   chunk identity, and creates an encrypted snapshot manifest.
 - `fileferry-core` can read back encrypted snapshot manifests and chunk indexes
   with authenticated object contexts and decrypted metadata identity checks.
+- `fileferry-core` has initial tested restore primitives for manifest
+  timestamps, snapshot selection by id/tag/latest, and path-scoped regular-file
+  content reassembly from encrypted chunks.
 - `fileferry-web` serves the public `fileferry.app` homepage with Axum,
   server-rendered Leptos views, embedded CSS, and a `/healthz` endpoint.
 - The initial product brief has been distilled into `README.md`,
@@ -431,8 +434,8 @@ where documented verification passes on a clean checkout.
 
 ### Phase 6 - Restore Pipeline
 
-- [ ] Implement snapshot selection by id, tag, and `latest`.
-- [ ] Implement path-scoped restore.
+- [x] Implement snapshot selection by id, tag, and `latest`.
+- [x] Implement path-scoped restore.
 - [ ] Implement destination safety checks.
 - [ ] Implement metadata restore per platform.
 - [ ] Add overwrite policy and dry-run reporting.
@@ -572,6 +575,11 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Added the first restore pipeline slice in `fileferry-core`:
+  snapshot manifests now carry creation timestamps, loaded manifests can be
+  selected by id, newest matching tag, or latest overall, and restore content
+  reads path-scoped regular files back from encrypted chunks with chunk identity
+  checks. Verified with `cargo test -p fileferry-core`.
 - 2026-05-18 - Added authenticated repository-object read helpers for snapshot
   manifests and chunk indexes, including identity checks for decrypted metadata.
   Expanded adversarial coverage for wrong repository keys, bit flips,
