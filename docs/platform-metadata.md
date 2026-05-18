@@ -60,7 +60,10 @@ metadata that the destination can represent.
 
 Current implementation status: initialized local repository restores apply
 captured modified timestamps for restored regular files and directories after
-content writes and verification. They do not restore symlink timestamps,
+content writes and verification. Dry-run restore reports the count of
+regular-file and directory modified timestamp fields selected for restore and
+can surface denied, unsupported, or invalid timestamp warnings without writing
+destination entries. Current restores do not restore symlink timestamps,
 creation/birth time, ownership, mode bits, ACLs, xattrs, resource forks,
 Windows attributes, BSD flags, sparse extents, or other platform-specific
 metadata yet. A timestamp that was selected for application but could not be

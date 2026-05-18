@@ -541,6 +541,7 @@ struct RestoreData {
     files_written: usize,
     directories_written: usize,
     symlinks_written: usize,
+    metadata_planned: usize,
     metadata_applied: usize,
     metadata_warnings: Vec<RestoreMetadataWarning>,
     bytes_written: u64,
@@ -1468,6 +1469,7 @@ fn restore(
         files_written,
         directories_written,
         symlinks_written,
+        metadata_planned: result.metadata_planned,
         metadata_applied: result.metadata_applied,
         metadata_warnings: result
             .metadata_warnings
@@ -2116,6 +2118,7 @@ mod tests {
                 files_written: 1,
                 directories_written: 0,
                 symlinks_written: 0,
+                metadata_planned: 1,
                 metadata_applied: 0,
                 metadata_warnings: vec![RestoreMetadataWarning {
                     path: "sample.txt".to_owned(),
@@ -2147,6 +2150,7 @@ mod tests {
                 files_written: 1,
                 directories_written: 0,
                 symlinks_written: 0,
+                metadata_planned: 1,
                 metadata_applied: 0,
                 metadata_warnings: vec![RestoreMetadataWarning {
                     path: "sample.txt".to_owned(),

@@ -131,6 +131,7 @@ restore
   data.files_written: integer
   data.directories_written: integer
   data.symlinks_written: integer
+  data.metadata_planned: integer
   data.metadata_applied: integer
   data.metadata_warnings: array of RestoreMetadataWarning
   data.bytes_written: integer
@@ -470,15 +471,19 @@ exists unless `--overwrite` is supplied. Restored symlink destination paths and
 symlinked ancestors are rejected if they already exist; symlinks are created
 after directory and regular-file writes so restore writes do not traverse
 newly restored symlinks. `--dry-run` reports selected entries and planned
-writes without creating destination entries. JSON output follows the Restore
-data schema above; JSONL output emits the implemented progress phases listed
-above. Current metadata application is limited to captured modified timestamps
-for restored regular files and directories. Symlink timestamps, ownership,
-mode bits, ACLs, xattrs, resource forks, Windows attributes, BSD flags, and
-other platform-specific metadata are not restored yet. If a timestamp is
-selected for application but cannot be applied, restore reports a
-`metadata_warnings` item and exits with partial-success code `10`; JSON and
-JSONL modes keep those warnings on stdout.
+writes without creating destination entries. It also reports
+`metadata_planned`, the count of regular-file and directory modified timestamp
+fields selected for restore. JSON output follows the Restore data schema
+above; JSONL output emits the implemented progress phases listed above.
+Current metadata application is limited to captured modified timestamps for
+restored regular files and directories. Symlink timestamps, ownership, mode
+bits, ACLs, xattrs, resource forks, Windows attributes, BSD flags, and other
+platform-specific metadata are not restored yet. If a timestamp is selected
+for application but cannot be applied, or if dry-run planning determines that
+the selected timestamp is denied, unsupported, or outside the destination
+system time range, restore reports a `metadata_warnings` item and exits with
+partial-success code `10`; JSON and JSONL modes keep those warnings on
+stdout.
 
 `ferry check` opens an initialized local repository with `FILEFERRY_PASSWORD`
 or `FILEFERRY_PASSWORD_FILE`, authenticates committed snapshot manifests,

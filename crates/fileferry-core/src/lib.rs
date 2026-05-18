@@ -1616,7 +1616,24 @@ impl BackupPipeline {
             });
         }
 
-        if !request.dry_run {
+        let metadata_planned = planned_files.len() + planned_directories.len();
+        if request.dry_run {
+            for file in &planned_files {
+                plan_restored_modified_timestamp(
+                    &file.relative_path,
+                    &file.modified,
+                    &mut metadata_warnings,
+                );
+            }
+
+            for directory in &planned_directories {
+                plan_restored_modified_timestamp(
+                    &directory.relative_path,
+                    &directory.modified,
+                    &mut metadata_warnings,
+                );
+            }
+        } else {
             for file in &planned_files {
                 metadata_applied += apply_restored_modified_timestamp(
                     &file.destination_path,
@@ -1645,6 +1662,7 @@ impl BackupPipeline {
             directories: planned_directories,
             files: planned_files,
             symlinks: planned_symlinks,
+            metadata_planned,
             metadata_applied,
             metadata_warnings,
             bytes,
@@ -1965,6 +1983,7 @@ pub struct RestoreDestinationResult {
     pub directories: Vec<RestoreDestinationDirectory>,
     pub files: Vec<RestoreDestinationFile>,
     pub symlinks: Vec<RestoreDestinationSymlink>,
+    pub metadata_planned: usize,
     pub metadata_applied: usize,
     pub metadata_warnings: Vec<RestoreMetadataWarning>,
     pub bytes: u64,
@@ -2446,32 +2465,8 @@ fn apply_restored_modified_timestamp(
     target: RestoredMetadataTarget,
     warnings: &mut Vec<RestoreMetadataWarning>,
 ) -> usize {
-    let timestamp = match modified {
-        MetadataValue::Captured(timestamp) => timestamp,
-        MetadataValue::Unsupported => {
-            warnings.push(RestoreMetadataWarning {
-                relative_path: relative_path.to_path_buf(),
-                field: "modified",
-                reason: "modified timestamp was not captured".to_owned(),
-            });
-            return 0;
-        }
-        MetadataValue::Denied(reason) => {
-            warnings.push(RestoreMetadataWarning {
-                relative_path: relative_path.to_path_buf(),
-                field: "modified",
-                reason: format!("modified timestamp was denied during backup: {reason}"),
-            });
-            return 0;
-        }
-    };
-
-    let Some(modified_time) = system_time_from_timestamp(*timestamp) else {
-        warnings.push(RestoreMetadataWarning {
-            relative_path: relative_path.to_path_buf(),
-            field: "modified",
-            reason: "modified timestamp is outside the supported system time range".to_owned(),
-        });
+    let Some(modified_time) = restored_modified_time_or_warn(relative_path, modified, warnings)
+    else {
         return 0;
     };
 
@@ -2486,6 +2481,51 @@ fn apply_restored_modified_timestamp(
             0
         }
     }
+}
+
+fn plan_restored_modified_timestamp(
+    relative_path: &Path,
+    modified: &MetadataValue<Timestamp>,
+    warnings: &mut Vec<RestoreMetadataWarning>,
+) {
+    let _ = restored_modified_time_or_warn(relative_path, modified, warnings);
+}
+
+fn restored_modified_time_or_warn(
+    relative_path: &Path,
+    modified: &MetadataValue<Timestamp>,
+    warnings: &mut Vec<RestoreMetadataWarning>,
+) -> Option<SystemTime> {
+    let timestamp = match modified {
+        MetadataValue::Captured(timestamp) => timestamp,
+        MetadataValue::Unsupported => {
+            warnings.push(RestoreMetadataWarning {
+                relative_path: relative_path.to_path_buf(),
+                field: "modified",
+                reason: "modified timestamp was not captured".to_owned(),
+            });
+            return None;
+        }
+        MetadataValue::Denied(reason) => {
+            warnings.push(RestoreMetadataWarning {
+                relative_path: relative_path.to_path_buf(),
+                field: "modified",
+                reason: format!("modified timestamp was denied during backup: {reason}"),
+            });
+            return None;
+        }
+    };
+
+    let Some(modified_time) = system_time_from_timestamp(*timestamp) else {
+        warnings.push(RestoreMetadataWarning {
+            relative_path: relative_path.to_path_buf(),
+            field: "modified",
+            reason: "modified timestamp is outside the supported system time range".to_owned(),
+        });
+        return None;
+    };
+
+    Some(modified_time)
 }
 
 fn system_time_from_timestamp(timestamp: Timestamp) -> Option<SystemTime> {
@@ -3521,6 +3561,7 @@ mod tests {
 
         assert_eq!(restored.snapshot_id, result.snapshot_id);
         assert_eq!(restored.files.len(), 2);
+        assert_eq!(restored.metadata_planned, 3);
         assert_eq!(restored.bytes, 6);
         assert_eq!(restored.verified_files, 2);
         assert!(restored.files.iter().all(|file| file.verified));
@@ -3589,6 +3630,7 @@ mod tests {
             .expect("destination restore");
 
         assert_eq!(restored.metadata_applied, 2);
+        assert_eq!(restored.metadata_planned, 2);
         assert_eq!(restored.metadata_warnings, Vec::new());
         assert_eq!(
             capture_metadata(destination.path().join("docs"))
@@ -3627,6 +3669,43 @@ mod tests {
                 field: "modified",
                 reason: "modified timestamp was not captured".to_owned(),
             }]
+        );
+    }
+
+    #[test]
+    fn plan_restored_modified_timestamp_reports_denied_and_invalid_values() {
+        let mut warnings = Vec::new();
+
+        plan_restored_modified_timestamp(
+            Path::new("denied.txt"),
+            &MetadataValue::Denied("permission denied".to_owned()),
+            &mut warnings,
+        );
+        plan_restored_modified_timestamp(
+            Path::new("invalid.txt"),
+            &MetadataValue::Captured(Timestamp {
+                seconds: 0,
+                nanoseconds: 1_000_000_000,
+            }),
+            &mut warnings,
+        );
+
+        assert_eq!(
+            warnings,
+            vec![
+                RestoreMetadataWarning {
+                    relative_path: PathBuf::from("denied.txt"),
+                    field: "modified",
+                    reason: "modified timestamp was denied during backup: permission denied"
+                        .to_owned(),
+                },
+                RestoreMetadataWarning {
+                    relative_path: PathBuf::from("invalid.txt"),
+                    field: "modified",
+                    reason: "modified timestamp is outside the supported system time range"
+                        .to_owned(),
+                },
+            ]
         );
     }
 
@@ -3731,6 +3810,9 @@ mod tests {
 
         assert!(restored.dry_run);
         assert_eq!(restored.verified_files, 0);
+        assert_eq!(restored.metadata_planned, 2);
+        assert_eq!(restored.metadata_applied, 0);
+        assert_eq!(restored.metadata_warnings, Vec::new());
         assert_eq!(restored.files.len(), 1);
         assert_eq!(
             restored.files[0].action,

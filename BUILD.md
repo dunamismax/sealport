@@ -39,9 +39,10 @@ Last reviewed: 2026-05-18.
   regular-file contents, Unix symlinks, and captured modified timestamps for
   restored regular files and directories through the core restore pipeline,
   enforces destination fail-if-exists safety unless `--overwrite` is supplied
-  for regular files, supports dry-run reporting, returns partial-success exit
-  code `10` when metadata warnings are produced, and exposes tested human,
-  JSON, and JSONL-safe output paths.
+  for regular files, supports dry-run reporting including planned modified
+  timestamp metadata and timestamp planning warnings, returns partial-success
+  exit code `10` when metadata warnings are produced, and exposes tested
+  human, JSON, and JSONL-safe output paths.
 - `ferry check` opens initialized local repositories, unlocks with
   `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed
   manifests and chunk indexes, reads/decompresses every referenced chunk, and
@@ -83,7 +84,8 @@ Last reviewed: 2026-05-18.
 - `fileferry-core` can restore directory entries, regular-file content, Unix
   symlinks, and regular-file/directory modified timestamps to a destination
   directory with destination safety checks, explicit overwrite policy, dry-run
-  reporting, and optional byte-for-byte verification.
+  reporting, timestamp metadata planning, and optional byte-for-byte
+  verification.
 - `fileferry-core` writes commit markers after encrypted snapshot manifests,
   can discover committed manifests from those markers, and has tested snapshot
   summary and immediate-entry listing primitives for future `snapshots` and
@@ -614,6 +616,19 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Improved restore dry-run metadata reporting without broadening
+  platform metadata claims. `fileferry-core` now reports `metadata_planned`
+  for restored regular-file and directory modified timestamp fields and runs
+  the same denied/unsupported/invalid timestamp planning checks during
+  dry-run, while still applying only captured modified timestamps for regular
+  files and directories during real restores. `fileferry-cli` includes
+  `metadata_planned` in restore JSON/JSONL output, preserves warning behavior
+  on stdout for machine modes, and documents the field in
+  `docs/cli-contract.md` and `docs/platform-metadata.md`. Refreshed the local
+  operations drill in `docs/operations.md` with observed modified-timestamp
+  verification for one regular file and one nested directory. Verified
+  initially with `cargo test -p fileferry-core` and `cargo test -p
+  fileferry-cli`.
 - 2026-05-18 - Added the first narrow restore metadata application slice for
   initialized local repositories. `fileferry-core` now carries captured
   modified timestamps through restore planning and applies them to restored
