@@ -282,8 +282,8 @@ origin https://github.com/dunamismax/sealport.git
 - Before substantial code changes, inspect branch and status.
 - Prefer `git pull --ff-only origin main` or the current branch before major
   implementation work when network access is available and appropriate.
-- Prefer feature branches with the `codex/` prefix unless Stephen asks for a
-  different branch name.
+- Work directly on `main`; do not create feature branches unless Stephen gives
+  an explicit exception for a specific task.
 - Prefer `git push origin <branch>` for routine pushes.
 - Attribute committed work to the repo's configured `dunamismax` identity.
 - Do not override commit authors with `-c user.name=...` or
