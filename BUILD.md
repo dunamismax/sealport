@@ -29,6 +29,10 @@ Last reviewed: 2026-05-18.
 - `sealport-crypto` has initial tested primitives for master-key creation,
   passphrase key-slot unlock, HKDF subkeys, and XChaCha20-Poly1305 object
   envelopes.
+- `sealport-storage` has a tested object-store trait, capability model,
+  validated object keys, and local filesystem backend.
+- `sealport-testkit` has a tested in-memory fake object store for future
+  repository and pipeline tests.
 - The initial product brief has been distilled into `README.md`,
   `BUILD.md`, and `AGENTS.md`.
 - The product target is an all-Rust, cross-platform, encrypted backup CLI
@@ -362,13 +366,13 @@ where documented verification passes on a clean checkout.
 
 ### Phase 4 - Storage Backends
 
-- [ ] Implement local filesystem backend.
+- [x] Implement local filesystem backend.
 - [ ] Implement S3-compatible backend through `object_store` or a documented
       lower-level choice.
-- [ ] Add storage capability model.
+- [x] Add storage capability model.
 - [ ] Add retry, timeout, concurrency, and backoff behavior.
-- [ ] Add fake object store in `sealport-testkit`.
-- [ ] Add interruption and idempotency tests.
+- [x] Add fake object store in `sealport-testkit`.
+- [x] Add interruption and idempotency tests.
 
 ### Phase 5 - Backup Pipeline
 
@@ -529,6 +533,12 @@ Trust current primary docs and observed behavior over this file.
   creation/unlock, passphrase key slots, subkey derivation, and authenticated
   object envelopes in `sealport-crypto`. Verified with `cargo test -p
   sealport-crypto`.
+- 2026-05-18 - Completed the first Phase 4 storage slice: added validated
+  object keys, the object-store trait, storage capability reporting, a local
+  filesystem backend with idempotent immutable writes, leftover temp-object
+  listing protection, and an in-memory fake object store in
+  `sealport-testkit`. Added `docs/storage.md`. Verified with `cargo test -p
+  sealport-storage -p sealport-testkit`.
 - 2026-05-18 - Completed the Phase 2 CLI foundation: config discovery,
   profiles, CLI/env/config precedence, typed config validation, redacted
   diagnostics, JSON and JSONL envelopes, event names, shell completions, and
