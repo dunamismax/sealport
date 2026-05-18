@@ -33,6 +33,12 @@ Last reviewed: 2026-05-18.
 - `ferry snapshots` and `ferry ls` open initialized local repositories,
   authenticate committed encrypted manifests, and expose tested human, JSON,
   and JSONL-safe output paths.
+- `ferry restore` opens initialized local repositories, unlocks with
+  `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, selects snapshots by
+  latest, snapshot id, or tag, restores all or path-scoped regular-file
+  contents through the core restore pipeline, enforces destination
+  fail-if-exists safety unless `--overwrite` is supplied, supports dry-run
+  reporting, and exposes tested human, JSON, and JSONL-safe output paths.
 - CLI config discovery, profiles, environment precedence, redacted
   diagnostics, and machine-output envelopes exist for the current command
   surface.
@@ -78,9 +84,12 @@ Last reviewed: 2026-05-18.
 - The product target is an all-Rust, cross-platform, encrypted backup CLI
   named `ferry`.
 
-The repo is still pre-v1 and restore is not wired into the CLI. Describe
-backup, restore, repository, storage, crypto, or platform behavior only to the
-level backed by code, tests, and platform evidence.
+The repo is still pre-v1. Restore is wired into the CLI for initialized local
+repositories and regular-file contents, but directory entry restore, symlink
+restore, metadata application, and S3-compatible repository bootstrap/restore
+are not complete. Describe backup, restore, repository, storage, crypto, or
+platform behavior only to the level backed by code, tests, and platform
+evidence.
 
 The `fileferry-web` crate is public marketing infrastructure only. It does not
 turn FileFerry into a backup server, hosted product, daemon, scheduler, or web
@@ -348,7 +357,7 @@ Minimum v1 bar:
 - [x] Rust workspace exists with the target crate boundaries.
 - [ ] `ferry init` creates encrypted local and S3-compatible repositories.
 - [x] `ferry backup` creates encrypted, compressed, deduplicated snapshots.
-- [ ] `ferry restore` restores by snapshot id, tag, path, and `latest`.
+- [x] `ferry restore` restores by snapshot id, tag, path, and `latest`.
 - [x] `ferry snapshots` and `ferry ls` have human, JSON, and JSONL-safe
       behavior where appropriate.
 - [ ] `ferry check` verifies metadata and configurable data subsets.
@@ -365,7 +374,7 @@ Minimum v1 bar:
 - [ ] Release artifacts include archives, checksums, signatures, SBOM, and
       `cargo-auditable` metadata.
 - [ ] Install scripts for Unix shells and PowerShell are tested.
-- [ ] At least one restore drill is documented from a real FileFerry snapshot.
+- [x] At least one restore drill is documented from a real FileFerry snapshot.
 
 V1 must not include GUI, TUI, FUSE mount, daemon mode, server mode, magic
 scheduling, mobile apps, or compatibility with restic/rustic repositories.
@@ -457,7 +466,7 @@ where documented verification passes on a clean checkout.
 - [ ] Implement metadata restore per platform.
 - [x] Add overwrite policy and dry-run reporting.
 - [x] Add restore verification.
-- [ ] Add restore drill docs.
+- [x] Add restore drill docs.
 
 ### Phase 7 - Listing, Search, And Diff
 
@@ -592,6 +601,19 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Wired `ferry restore` into `fileferry-cli` for initialized
+  local repositories. The command unlocks through `FILEFERRY_PASSWORD` or
+  `FILEFERRY_PASSWORD_FILE`, selects latest by default or via `--latest`,
+  `--snapshot`, or `--tag`, accepts repeated snapshot-relative `--path`
+  filters, restores regular-file contents through the existing core restore
+  pipeline, verifies written bytes, supports `--dry-run`, and enforces
+  fail-if-exists destination safety unless `--overwrite` is supplied. Added
+  CLI integration tests for real `init -> backup -> restore` file-byte
+  recovery, JSONL restore phases, wrong-password failure, and destination
+  safety/overwrite behavior. Added `docs/operations.md` with a local restore
+  drill performed against a temporary real FileFerry snapshot and byte-checked
+  with `cmp`; no S3, metadata, directory-entry, or symlink restore coverage is
+  claimed. Verified initially with `cargo test -p fileferry-cli`.
 - 2026-05-18 - Wired `ferry backup` into `fileferry-cli` for initialized local
   repositories. The command accepts one or more local source paths plus repeated
   `--tag`, unlocks through `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`,

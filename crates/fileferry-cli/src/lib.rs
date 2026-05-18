@@ -1,7 +1,8 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use fileferry_core::{
-    BackupPipeline, BackupPipelineConfig, BackupRequest, CoreError, MetadataStatus, SnapshotEntry,
+    BackupPipeline, BackupPipelineConfig, BackupRequest, CoreError, MetadataStatus,
+    RestoreDestinationAction, RestoreDestinationRequest, RestoreOverwritePolicy, SnapshotEntry,
     SnapshotSelection, create_repository, list_snapshot_entries, open_repository, select_snapshot,
     snapshot_summaries,
 };
@@ -115,6 +116,37 @@ pub enum Command {
 
         /// Snapshot-relative path to list.
         path: Option<PathBuf>,
+    },
+
+    /// Restore regular-file contents from a committed snapshot.
+    Restore {
+        /// Snapshot id to restore.
+        #[arg(long, conflicts_with_all = ["tag", "latest"])]
+        snapshot: Option<String>,
+
+        /// Select the newest snapshot with this tag.
+        #[arg(long, conflicts_with_all = ["snapshot", "latest"])]
+        tag: Option<String>,
+
+        /// Select the newest committed snapshot.
+        #[arg(long, conflicts_with_all = ["snapshot", "tag"])]
+        latest: bool,
+
+        /// Snapshot-relative path to restore. May be repeated.
+        #[arg(long = "path")]
+        paths: Vec<PathBuf>,
+
+        /// Report what would be restored without writing files.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Overwrite existing destination files.
+        #[arg(long)]
+        overwrite: bool,
+
+        /// Destination directory for restored files.
+        #[arg(value_name = "DESTINATION")]
+        destination: PathBuf,
     },
 
     /// Print version information.
@@ -476,6 +508,37 @@ struct BackupData {
     manifest_id: String,
 }
 
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct RestoreData {
+    snapshot_id: String,
+    destination: String,
+    paths: Vec<String>,
+    dry_run: bool,
+    overwrite: CliRestoreOverwritePolicy,
+    entries_selected: usize,
+    files_written: usize,
+    directories_written: usize,
+    symlinks_written: usize,
+    metadata_applied: usize,
+    metadata_warnings: Vec<RestoreMetadataWarning>,
+    bytes_written: u64,
+    verified_files: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CliRestoreOverwritePolicy {
+    FailIfExists,
+    OverwriteFiles,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct RestoreMetadataWarning {
+    path: String,
+    field: String,
+    reason: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum CliBackendKind {
@@ -563,6 +626,26 @@ pub fn run(cli: Cli) -> Result<Output, CliError> {
                 &config,
                 snapshot_selection(snapshot, tag, latest),
                 path.unwrap_or_default(),
+            )
+        }
+        Command::Restore {
+            snapshot,
+            tag,
+            latest,
+            paths,
+            dry_run,
+            overwrite,
+            destination,
+        } => {
+            let config = resolve_config(&cli.globals)?;
+            restore(
+                mode,
+                &config,
+                snapshot_selection(snapshot, tag, latest),
+                paths,
+                destination,
+                dry_run,
+                overwrite,
             )
         }
         Command::Version => {
@@ -942,6 +1025,82 @@ fn ls(
     })
 }
 
+fn restore(
+    mode: OutputMode,
+    config: &ResolvedConfig,
+    selection: SnapshotSelection,
+    paths: Vec<PathBuf>,
+    destination: PathBuf,
+    dry_run: bool,
+    overwrite: bool,
+) -> Result<Output, CliError> {
+    let repository = local_repository(config)?;
+    let passphrase = repository_passphrase()?;
+    let destination = absolute_source_path(&destination)?;
+    let display_destination = redact_for_display(&destination.display().to_string());
+    let display_paths = paths
+        .iter()
+        .map(|path| display_snapshot_path(path))
+        .collect::<Vec<_>>();
+    let overwrite_policy = if overwrite {
+        RestoreOverwritePolicy::OverwriteFiles
+    } else {
+        RestoreOverwritePolicy::FailIfExists
+    };
+    let cli_overwrite = if overwrite {
+        CliRestoreOverwritePolicy::OverwriteFiles
+    } else {
+        CliRestoreOverwritePolicy::FailIfExists
+    };
+
+    let runtime = tokio_runtime()?;
+    let opened = runtime.block_on(open_repository(&repository.store, &passphrase))?;
+    let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id))?;
+    let manifests = runtime.block_on(
+        pipeline.read_committed_snapshot_manifests(&repository.store, &opened.master_key),
+    )?;
+    let snapshot_id = select_snapshot(&manifests, &selection)?.snapshot_id.clone();
+    let result = runtime.block_on(pipeline.restore_snapshot_to_destination(
+        &repository.store,
+        &opened.master_key,
+        RestoreDestinationRequest {
+            snapshot_id,
+            paths,
+            destination,
+            overwrite: overwrite_policy,
+            dry_run,
+            verify: true,
+        },
+    ))?;
+    let files_written = result
+        .files
+        .iter()
+        .filter(|file| {
+            matches!(
+                file.action,
+                RestoreDestinationAction::Written | RestoreDestinationAction::WouldWrite
+            )
+        })
+        .count();
+    let data = RestoreData {
+        snapshot_id: result.snapshot_id,
+        destination: display_destination,
+        paths: display_paths,
+        dry_run: result.dry_run,
+        overwrite: cli_overwrite,
+        entries_selected: result.selected_entries,
+        files_written,
+        directories_written: 0,
+        symlinks_written: 0,
+        metadata_applied: 0,
+        metadata_warnings: Vec::new(),
+        bytes_written: result.bytes,
+        verified_files: result.verified_files,
+    };
+
+    emit_restore_command(mode, data)
+}
+
 struct LocalRepository {
     url: String,
     backend: CliBackendKind,
@@ -1172,6 +1331,88 @@ fn emit_backup_command(mode: OutputMode, data: BackupData) -> Result<Output, Cli
                 schema_version: OUTPUT_SCHEMA_VERSION,
                 event: EventKind::CommandCompleted,
                 command: "backup",
+                status: CommandStatus::Success,
+                data: Some(data),
+            };
+            lines.push(serde_json::to_string(&completed)?);
+            lines.join("\n") + "\n"
+        }
+    };
+
+    Ok(Output {
+        stdout,
+        stderr: String::new(),
+    })
+}
+
+fn emit_restore_command(mode: OutputMode, data: RestoreData) -> Result<Output, CliError> {
+    let stdout = match mode {
+        OutputMode::Human => {
+            let action = if data.dry_run {
+                "Would restore"
+            } else {
+                "Restored"
+            };
+            format!(
+                "{} snapshot {} to {}\nentries_selected={} files={} bytes={} verified_files={}\n",
+                action,
+                data.snapshot_id,
+                data.destination,
+                data.entries_selected,
+                data.files_written,
+                data.bytes_written,
+                data.verified_files
+            )
+        }
+        OutputMode::Json => {
+            let document = CommandDocument {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                command: "restore",
+                status: CommandStatus::Success,
+                data,
+            };
+            format!("{}\n", serde_json::to_string_pretty(&document)?)
+        }
+        OutputMode::Jsonl => {
+            let started = CommandEvent::<RestoreData> {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                event: EventKind::CommandStarted,
+                command: "restore",
+                status: CommandStatus::Started,
+                data: None,
+            };
+            let phases = [
+                ("load_manifest", "loaded snapshot manifest"),
+                ("read_chunks", "read and verified encrypted chunks"),
+                ("write_entries", "processed restore entries"),
+                ("apply_metadata", "recorded metadata restore status"),
+                ("verify", "recorded restore verification status"),
+                ("complete", "completed restore"),
+            ];
+            let mut lines = vec![serde_json::to_string(&started)?];
+            for (phase, message) in phases {
+                let event = CommandEvent {
+                    schema_version: OUTPUT_SCHEMA_VERSION,
+                    event: EventKind::Progress,
+                    command: "restore",
+                    status: CommandStatus::Started,
+                    data: Some(ProgressData {
+                        phase,
+                        message,
+                        items_done: Some(data.files_written),
+                        items_total: Some(data.files_written),
+                        bytes_done: Some(data.bytes_written),
+                        bytes_total: Some(data.bytes_written),
+                        snapshot_id: Some(data.snapshot_id.clone()),
+                        object_key: None,
+                    }),
+                };
+                lines.push(serde_json::to_string(&event)?);
+            }
+            let completed = CommandEvent {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                event: EventKind::CommandCompleted,
+                command: "restore",
                 status: CommandStatus::Success,
                 data: Some(data),
             };

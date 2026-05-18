@@ -34,6 +34,7 @@ fn top_level_help_lists_stable_global_flags_and_commands() {
                 .and(predicates::str::contains("completion"))
                 .and(predicates::str::contains("init"))
                 .and(predicates::str::contains("backup"))
+                .and(predicates::str::contains("restore"))
                 .and(predicates::str::contains("snapshots"))
                 .and(predicates::str::contains("ls"))
                 .and(predicates::str::contains("version")),

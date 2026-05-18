@@ -365,6 +365,25 @@ backup command_completed
   status: "success"
   data: Backup data schema above
 
+restore command_started
+  status: "started"
+  data: null
+
+restore progress
+  status: "started"
+  data.phase: "load_manifest" | "read_chunks" | "write_entries" | "apply_metadata" | "verify" | "complete"
+  data.message: string
+  data.items_done: integer | null
+  data.items_total: integer | null
+  data.bytes_done: integer | null
+  data.bytes_total: integer | null
+  data.snapshot_id: string | null
+  data.object_key: string | null
+
+restore command_completed
+  status: "success"
+  data: Restore data schema above
+
 snapshots command_started
   status: "started"
   data: null
@@ -409,6 +428,19 @@ repeated. JSON output follows the Backup data schema above; JSONL output emits
 the implemented progress phases listed above. Source paths are local
 filesystem paths; S3-compatible repository bootstrap remains unwired in the
 CLI.
+
+`ferry restore <DESTINATION>` opens an initialized local repository with
+`FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, selects `latest` by default
+or accepts `--snapshot <ID>` / `--tag <TAG>` / `--latest`, and restores
+regular-file contents under the destination directory. `--path <PATH>` may be
+repeated to restore snapshot-relative paths. The command fails if a destination
+file already exists unless `--overwrite` is supplied. `--dry-run` reports the
+selected entries and planned regular-file writes without creating destination
+files. JSON output follows the Restore data schema above; JSONL output emits
+the implemented progress phases listed above. Directory entry restore, symlink
+restore, and metadata application are not implemented yet; the command reports
+zero for those counters and emits metadata warnings only when real warning data
+exists.
 
 `ferry snapshots` opens an initialized local repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed
