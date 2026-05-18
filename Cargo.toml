@@ -25,6 +25,7 @@ chacha20poly1305 = "0.10.1"
 clap = { version = "4.6.1", features = ["derive"] }
 clap_complete = "4.6.1"
 futures-util = "0.3.31"
+fastcdc = "4.0.1"
 hkdf = "0.12.4"
 leptos = { version = "0.8.14", default-features = false, features = ["ssr"] }
 object_store = { version = "0.13.2", default-features = false, features = ["aws"] }

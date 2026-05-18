@@ -43,7 +43,8 @@ Last reviewed: 2026-05-18.
 - `fileferry-testkit` has a tested in-memory fake object store for future
   repository and pipeline tests.
 - `fileferry-core` has a tested deterministic source walker with wildcard
-  exclusion rules and symlink-aware metadata capture.
+  exclusion rules, symlink-aware metadata capture, and validated FastCDC
+  content-defined chunk planning.
 - `fileferry-web` serves the public `fileferry.app` homepage with Axum,
   server-rendered Leptos views, embedded CSS, and a `/healthz` endpoint.
 - The initial product brief has been distilled into `README.md`,
@@ -413,8 +414,8 @@ where documented verification passes on a clean checkout.
 ### Phase 5 - Backup Pipeline
 
 - [x] Implement source walking and exclusion rules.
-- [ ] Implement platform metadata capture.
-- [ ] Implement content-defined chunking.
+- [x] Implement platform metadata capture.
+- [x] Implement content-defined chunking.
 - [ ] Implement compression and encryption pipeline.
 - [ ] Implement chunk/index writes.
 - [ ] Implement snapshot manifest creation.
@@ -565,6 +566,11 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Added validated FastCDC content-defined chunk planning in
+  `fileferry-core`, including default v0 chunk-size targets, bounds checking
+  against the FastCDC implementation, deterministic chunk-range tests, and
+  small-input behavior. Marked the existing tested platform metadata capture
+  Phase 5 item complete. Verified with `cargo test -p fileferry-core`.
 - 2026-05-18 - Added initial backup-source walking in `fileferry-core` with
   deterministic traversal, absolute-root validation, wildcard exclusion rules
   including `**`, directory pruning, and symlink-aware metadata capture via

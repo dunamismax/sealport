@@ -1,5 +1,8 @@
 //! Core repository, snapshot, backup, restore, and check orchestration.
 
+use fastcdc::v2020::{
+    AVERAGE_MAX, AVERAGE_MIN, FastCDC, MAXIMUM_MAX, MAXIMUM_MIN, MINIMUM_MAX, MINIMUM_MIN,
+};
 use fileferry_platform::{EntryKind, EntryMetadata, PlatformError, capture_metadata};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -40,6 +43,9 @@ pub enum CoreError {
         #[source]
         source: PlatformError,
     },
+
+    #[error("chunking configuration is invalid: {reason}")]
+    InvalidChunkingConfig { reason: &'static str },
 }
 
 pub type CoreResult<T> = Result<T, CoreError>;
@@ -133,6 +139,120 @@ impl SourceWalker {
         self.exclusion_rules
             .iter()
             .any(|rule| rule.matches(relative_path))
+    }
+}
+
+pub const DEFAULT_MIN_CHUNK_SIZE: usize = 512 * 1024;
+pub const DEFAULT_AVG_CHUNK_SIZE: usize = 1024 * 1024;
+pub const DEFAULT_MAX_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ChunkingConfig {
+    pub min_size: usize,
+    pub avg_size: usize,
+    pub max_size: usize,
+}
+
+impl ChunkingConfig {
+    pub const fn new(min_size: usize, avg_size: usize, max_size: usize) -> Self {
+        Self {
+            min_size,
+            avg_size,
+            max_size,
+        }
+    }
+
+    pub fn validate(self) -> CoreResult<()> {
+        if self.min_size < MINIMUM_MIN {
+            return Err(CoreError::InvalidChunkingConfig {
+                reason: "minimum chunk size is below the FastCDC lower bound",
+            });
+        }
+        if self.min_size > MINIMUM_MAX {
+            return Err(CoreError::InvalidChunkingConfig {
+                reason: "minimum chunk size is above the FastCDC upper bound",
+            });
+        }
+        if self.avg_size < AVERAGE_MIN {
+            return Err(CoreError::InvalidChunkingConfig {
+                reason: "average chunk size is below the FastCDC lower bound",
+            });
+        }
+        if self.avg_size > AVERAGE_MAX {
+            return Err(CoreError::InvalidChunkingConfig {
+                reason: "average chunk size is above the FastCDC upper bound",
+            });
+        }
+        if self.max_size < MAXIMUM_MIN {
+            return Err(CoreError::InvalidChunkingConfig {
+                reason: "maximum chunk size is below the FastCDC lower bound",
+            });
+        }
+        if self.max_size > MAXIMUM_MAX {
+            return Err(CoreError::InvalidChunkingConfig {
+                reason: "maximum chunk size is above the FastCDC upper bound",
+            });
+        }
+        if self.min_size > self.avg_size {
+            return Err(CoreError::InvalidChunkingConfig {
+                reason: "minimum chunk size must be less than or equal to average chunk size",
+            });
+        }
+        if self.avg_size > self.max_size {
+            return Err(CoreError::InvalidChunkingConfig {
+                reason: "average chunk size must be less than or equal to maximum chunk size",
+            });
+        }
+
+        Ok(())
+    }
+}
+
+impl Default for ChunkingConfig {
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_MIN_CHUNK_SIZE,
+            DEFAULT_AVG_CHUNK_SIZE,
+            DEFAULT_MAX_CHUNK_SIZE,
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ContentChunk {
+    pub offset: u64,
+    pub length: u64,
+    pub gear_hash: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ContentChunker {
+    config: ChunkingConfig,
+}
+
+impl ContentChunker {
+    pub fn new(config: ChunkingConfig) -> CoreResult<Self> {
+        config.validate()?;
+        Ok(Self { config })
+    }
+
+    pub fn config(&self) -> ChunkingConfig {
+        self.config
+    }
+
+    pub fn chunk_bytes(&self, bytes: &[u8]) -> Vec<ContentChunk> {
+        FastCDC::new(
+            bytes,
+            self.config.min_size,
+            self.config.avg_size,
+            self.config.max_size,
+        )
+        .map(|chunk| ContentChunk {
+            offset: chunk.offset as u64,
+            length: chunk.length as u64,
+            gear_hash: chunk.hash,
+        })
+        .collect()
     }
 }
 
@@ -367,5 +487,63 @@ mod tests {
         assert!(ExclusionRule::new("*.tmp").matches(Path::new("src/cache.tmp")));
         assert!(ExclusionRule::new("node_modules").matches(Path::new("app/node_modules")));
         assert!(!ExclusionRule::new("*.tmp").matches(Path::new("src/cache.txt")));
+    }
+
+    #[test]
+    fn chunking_config_validates_fastcdc_bounds_and_order() {
+        assert!(ChunkingConfig::new(64, 256, 1024).validate().is_ok());
+        assert!(matches!(
+            ChunkingConfig::new(63, 256, 1024).validate(),
+            Err(CoreError::InvalidChunkingConfig { .. })
+        ));
+        assert!(matches!(
+            ChunkingConfig::new(512, 256, 1024).validate(),
+            Err(CoreError::InvalidChunkingConfig { .. })
+        ));
+        assert!(matches!(
+            ChunkingConfig::new(64, 2048, 1024).validate(),
+            Err(CoreError::InvalidChunkingConfig { .. })
+        ));
+    }
+
+    #[test]
+    fn content_chunker_returns_deterministic_ranges_covering_input() {
+        let config = ChunkingConfig::new(64, 256, 1024);
+        let chunker = ContentChunker::new(config).expect("valid chunker");
+        let bytes = (0..16_384)
+            .map(|index| ((index * 31 + index / 7) % 251) as u8)
+            .collect::<Vec<_>>();
+
+        let first = chunker.chunk_bytes(&bytes);
+        let second = chunker.chunk_bytes(&bytes);
+
+        assert_eq!(first, second);
+        assert!(!first.is_empty());
+        assert_eq!(first.first().expect("first chunk").offset, 0);
+
+        let mut cursor = 0_u64;
+        for chunk in &first {
+            assert_eq!(chunk.offset, cursor);
+            assert!(chunk.length > 0);
+            assert!(chunk.length <= config.max_size as u64);
+            cursor += chunk.length;
+        }
+        assert_eq!(cursor, bytes.len() as u64);
+    }
+
+    #[test]
+    fn content_chunker_keeps_small_inputs_as_one_chunk() {
+        let chunker =
+            ContentChunker::new(ChunkingConfig::new(64, 256, 1024)).expect("valid chunker");
+
+        assert_eq!(chunker.chunk_bytes(&[]), Vec::new());
+        assert_eq!(
+            chunker.chunk_bytes(b"short"),
+            vec![ContentChunk {
+                offset: 0,
+                length: 5,
+                gear_hash: 0,
+            }]
+        );
     }
 }
