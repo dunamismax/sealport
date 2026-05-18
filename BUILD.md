@@ -39,12 +39,13 @@ Last reviewed: 2026-05-18.
   regular-file contents, Unix symlinks, and captured modified timestamps for
   restored regular files and directories through the core restore pipeline,
   enforces destination fail-if-exists safety unless `--overwrite` is supplied
-  for regular files, rejects requested snapshot-relative restore paths that do
-  not match manifest entries before destination writes, supports dry-run
-  reporting including planned modified timestamp metadata and timestamp
-  planning warnings, returns partial-success exit code `10` when metadata
-  warnings are produced, and exposes tested human, JSON, and JSONL-safe output
-  paths.
+  for regular files, preflights destination safety for selected directories,
+  regular files, and symlinks before destination writes, rejects requested
+  snapshot-relative restore paths that do not match manifest entries before
+  destination writes, supports dry-run reporting including planned modified
+  timestamp metadata and timestamp planning warnings, returns partial-success
+  exit code `10` when metadata warnings are produced, and exposes tested human,
+  JSON, and JSONL-safe output paths.
 - `ferry check` opens initialized local repositories, unlocks with
   `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed
   manifests and chunk indexes, reads/decompresses every referenced chunk, and
@@ -624,6 +625,21 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Tightened restore destination safety without broadening restore
+  scope. `fileferry-core` now preflights destination safety for all selected
+  directories, regular files, and symlinks before any non-dry-run destination
+  writes, so a later fail-if-exists conflict does not leave earlier selected
+  entries behind. Added core and CLI regression coverage proving an existing
+  destination file returns exit code `2` in JSON mode, keeps stderr empty, and
+  leaves earlier selected directories unwritten. Documented the narrower
+  restore guarantee in `docs/cli-contract.md`. Verified initially with
+  targeted `cargo test -p fileferry-core
+  restore_snapshot_to_destination_preflights_conflicts_before_writes` and
+  `cargo test -p fileferry-cli
+  restore_json_failure_preflights_destination_conflicts_before_writes`, then
+  with `cargo test -p fileferry-core`, `cargo test -p fileferry-cli`, and the
+  full `just fmt`, `just check`, `just test`, `just build`, and
+  `git diff --check` gate.
 - 2026-05-18 - Tightened `ferry check` integrity diagnostics for committed
   chunk-reference failures without adding repair or subset-check behavior.
   `fileferry-core` now carries snapshot id, snapshot-relative path, and

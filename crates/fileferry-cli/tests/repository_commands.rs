@@ -430,6 +430,58 @@ fn restore_requires_correct_password_and_safe_destination() {
 }
 
 #[test]
+fn restore_json_failure_preflights_destination_conflicts_before_writes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::create_dir(source.join("early")).expect("create early directory");
+    fs::write(source.join("conflict.txt"), b"new").expect("write source conflict");
+    backup_source(&repo_url, passphrase, &source);
+
+    let destination = temp.path().join("restore");
+    fs::create_dir(&destination).expect("create destination");
+    fs::write(destination.join("conflict.txt"), b"old").expect("write destination conflict");
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "restore",
+            destination.to_str().expect("destination path"),
+        ])
+        .assert()
+        .code(2)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let failure: Value = serde_json::from_slice(&output).expect("restore failure json");
+
+    assert_eq!(failure["command"], "restore");
+    assert_eq!(failure["status"], "failure");
+    assert_eq!(failure["data"]["code"], "restore_destination_exists");
+    assert_eq!(failure["data"]["exit_code"], 2);
+    assert!(
+        failure["data"]["path"]
+            .as_str()
+            .expect("failure path")
+            .ends_with("conflict.txt")
+    );
+    assert!(!destination.join("early").exists());
+    assert_eq!(
+        fs::read(destination.join("conflict.txt")).expect("existing destination file"),
+        b"old"
+    );
+}
+
+#[test]
 fn restore_json_failure_reports_missing_requested_path() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");

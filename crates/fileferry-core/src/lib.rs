@@ -1648,9 +1648,9 @@ impl BackupPipeline {
             )
             .await?;
         let file_count = contents.files.len();
-        let mut planned_directories = Vec::with_capacity(contents.directories.len());
-        let mut planned_files = Vec::with_capacity(contents.files.len());
-        let mut planned_symlinks = Vec::with_capacity(contents.symlinks.len());
+        let mut prepared_directories = Vec::with_capacity(contents.directories.len());
+        let mut prepared_files = Vec::with_capacity(contents.files.len());
+        let mut prepared_symlinks = Vec::with_capacity(contents.symlinks.len());
         let mut metadata_warnings = contents.metadata_warnings;
         let mut metadata_applied = 0_usize;
 
@@ -1658,11 +1658,35 @@ impl BackupPipeline {
             let destination_path =
                 safe_destination_path(&request.destination, &directory.relative_path)?;
             ensure_restore_directory_destination_safe(&request.destination, &destination_path)?;
+            prepared_directories.push((directory, destination_path));
+        }
 
+        for file in contents.files {
+            let destination_path =
+                safe_destination_path(&request.destination, &file.relative_path)?;
+            ensure_restore_destination_safe(
+                &request.destination,
+                &destination_path,
+                request.overwrite,
+            )?;
+            prepared_files.push((file, destination_path));
+        }
+
+        for symlink in contents.symlinks {
+            let destination_path =
+                safe_destination_path(&request.destination, &symlink.relative_path)?;
+            ensure_restore_symlink_destination_safe(&request.destination, &destination_path)?;
+            prepared_symlinks.push((symlink, destination_path));
+        }
+
+        let mut planned_directories = Vec::with_capacity(prepared_directories.len());
+        let mut planned_files = Vec::with_capacity(prepared_files.len());
+        let mut planned_symlinks = Vec::with_capacity(prepared_symlinks.len());
+
+        for (directory, destination_path) in prepared_directories {
             if !request.dry_run {
                 create_restored_directory(&destination_path)?;
             }
-
             planned_directories.push(RestoreDestinationDirectory {
                 relative_path: directory.relative_path,
                 destination_path,
@@ -1675,14 +1699,7 @@ impl BackupPipeline {
             });
         }
 
-        for file in contents.files {
-            let destination_path =
-                safe_destination_path(&request.destination, &file.relative_path)?;
-            ensure_restore_destination_safe(
-                &request.destination,
-                &destination_path,
-                request.overwrite,
-            )?;
+        for (file, destination_path) in prepared_files {
             let byte_len = file.contents.len() as u64;
 
             if !request.dry_run {
@@ -1708,15 +1725,10 @@ impl BackupPipeline {
             });
         }
 
-        for symlink in contents.symlinks {
-            let destination_path =
-                safe_destination_path(&request.destination, &symlink.relative_path)?;
-            ensure_restore_symlink_destination_safe(&request.destination, &destination_path)?;
-
+        for (symlink, destination_path) in prepared_symlinks {
             if !request.dry_run {
                 create_restored_symlink(&symlink.target, &destination_path)?;
             }
-
             planned_symlinks.push(RestoreDestinationSymlink {
                 relative_path: symlink.relative_path,
                 destination_path,
@@ -4424,6 +4436,60 @@ mod tests {
         assert_eq!(
             fs::read(destination.path().join("sample.txt")).expect("overwritten file"),
             b"new"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_snapshot_to_destination_preflights_conflicts_before_writes() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let source = tempfile::tempdir().expect("source tempdir");
+        let destination = tempfile::tempdir().expect("destination tempdir");
+        fs::create_dir(source.path().join("early")).expect("create early directory");
+        fs::write(source.path().join("conflict.txt"), b"new").expect("write source conflict");
+        fs::write(destination.path().join("conflict.txt"), b"old")
+            .expect("write destination conflict");
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+
+        let blocked = pipeline
+            .restore_snapshot_to_destination(
+                &store,
+                &master_key,
+                RestoreDestinationRequest {
+                    snapshot_id: result.snapshot_id,
+                    paths: Vec::new(),
+                    destination: destination.path().to_path_buf(),
+                    overwrite: RestoreOverwritePolicy::FailIfExists,
+                    dry_run: false,
+                    verify: false,
+                },
+            )
+            .await
+            .expect_err("existing destination should block restore");
+
+        assert!(matches!(
+            blocked,
+            CoreError::RestoreDestinationExists { .. }
+        ));
+        assert!(!destination.path().join("early").exists());
+        assert_eq!(
+            fs::read(destination.path().join("conflict.txt")).expect("existing file"),
+            b"old"
         );
     }
 

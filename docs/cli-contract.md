@@ -472,11 +472,13 @@ destination directory. `--path <PATH>` may be repeated to restore
 snapshot-relative paths. If any requested snapshot-relative path matches no
 manifest entry, the command fails with exit code `7` before destination
 writes. The command fails if a destination file already exists unless
-`--overwrite` is supplied. Restored symlink destination paths and symlinked
-ancestors are rejected if they already exist; symlinks are created after
-directory and regular-file writes so restore writes do not traverse newly
-restored symlinks. `--dry-run` reports selected entries and planned writes
-without creating destination entries. It also reports
+`--overwrite` is supplied. Destination safety for the selected directory,
+regular-file, and symlink entries is preflighted before any destination writes
+begin. Restored symlink destination paths and symlinked ancestors are rejected
+if they already exist; symlinks are created after directory and regular-file
+writes so restore writes do not traverse newly restored symlinks. `--dry-run`
+reports selected entries and planned writes without creating destination
+entries. It also reports
 `metadata_planned`, the count of regular-file and directory modified timestamp
 fields selected for restore. JSON output follows the Restore data schema
 above; JSONL output emits the implemented progress phases listed above.
