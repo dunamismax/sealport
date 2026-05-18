@@ -37,8 +37,13 @@ Last reviewed: 2026-05-18.
   retention keep rules.
 - `docs/platform-metadata.md` defines the v1 metadata capture target and
   restore reporting behavior for unrepresentable metadata.
+- `fileferry-platform` has initial tested portable metadata capture for entry
+  kind, regular-file size, timestamps where exposed by `std`, symlink targets,
+  and Unix mode/ownership where available.
 - `fileferry-testkit` has a tested in-memory fake object store for future
   repository and pipeline tests.
+- `fileferry-core` has a tested deterministic source walker with wildcard
+  exclusion rules and symlink-aware metadata capture.
 - `fileferry-web` serves the public `fileferry.app` homepage with Axum,
   server-rendered Leptos views, embedded CSS, and a `/healthz` endpoint.
 - The initial product brief has been distilled into `README.md`,
@@ -369,7 +374,7 @@ where documented verification passes on a clean checkout.
 - [x] Implement config discovery and profiles.
 - [x] Implement global flags and environment variable precedence.
 - [x] Add typed config validation and redacted diagnostics.
-- [ ] Revisit `figment` or `config` only if the current explicit loader
+- [x] Revisit `figment` or `config` only if the current explicit loader
       becomes harder to audit than a small dependency-backed layering model.
 - [x] Define stable event model for command progress.
 - [x] Implement human, JSON, and JSONL output surfaces.
@@ -407,7 +412,7 @@ where documented verification passes on a clean checkout.
 
 ### Phase 5 - Backup Pipeline
 
-- [ ] Implement source walking and exclusion rules.
+- [x] Implement source walking and exclusion rules.
 - [ ] Implement platform metadata capture.
 - [ ] Implement content-defined chunking.
 - [ ] Implement compression and encryption pipeline.
@@ -560,6 +565,15 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Added initial backup-source walking in `fileferry-core` with
+  deterministic traversal, absolute-root validation, wildcard exclusion rules
+  including `**`, directory pruning, and symlink-aware metadata capture via
+  `fileferry-platform`. Added initial portable metadata capture for entry kind,
+  file size, timestamps, symlink targets, and Unix mode/ownership where
+  available. Revisited the explicit config loader and kept it instead of adding
+  `figment` or `config` because the current precedence model remains small and
+  auditable. Verified with `cargo test -p fileferry-platform` and `cargo test
+  -p fileferry-core`; full gate recorded with this change.
 - 2026-05-18 - Added `PolicyObjectStore` and `StoragePolicy` so storage
   operations can be bounded by retry count, per-operation timeout,
   exponential backoff, and max concurrency. Added tests for policy validation,
