@@ -323,8 +323,11 @@ V1 should not include:
 
 ## Development
 
-The repo currently contains planning docs and the MIT license. Once the Rust
-workspace exists, the normal local gate should become:
+The repo contains the initial Rust workspace, crate boundaries, CLI shell, CI
+workflow, and planning docs. The backup engine, repository format, storage
+backends, and crypto implementation are not built yet.
+
+The normal local gate is:
 
 ```sh
 cargo fmt --all --check

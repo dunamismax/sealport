@@ -9,7 +9,7 @@ and verification.
 Treat unchecked boxes as plan. Move stable material into `docs/`, `README.md`,
 or runbooks as the implementation matures.
 
-Last reviewed: 2026-05-17.
+Last reviewed: 2026-05-18.
 
 ---
 
@@ -18,15 +18,21 @@ Last reviewed: 2026-05-17.
 - Repository exists with MIT license.
 - `origin` fetches from and pushes to
   `https://github.com/dunamismax/sealport.git`.
-- No Rust workspace, source crates, CI, release workflow, or docs directory
-  exists yet.
+- Rust workspace exists with the target crate boundaries, `sealport-cli`
+  binary, `just` verification recipes, and GitHub Actions CI.
+- `sealport version` supports human, JSON, and JSONL output.
+- `sealport completion <SHELL>` generates shell completion scripts.
+- CLI config discovery, profiles, environment precedence, redacted
+  diagnostics, and machine-output envelopes exist for the current command
+  surface.
 - The initial product brief has been distilled into `README.md`,
   `BUILD.md`, and `AGENTS.md`.
 - The product target is an all-Rust, cross-platform, encrypted backup CLI
   named `sealport`.
 
-The repo is pre-implementation. Do not describe any runtime behavior as
-working until code, tests, and platform evidence exist.
+The repo is still pre-backup-engine. Do not describe backup, restore,
+repository, storage, crypto, or platform behavior as working until code,
+tests, and platform evidence exist.
 
 ---
 
@@ -231,10 +237,10 @@ sealport doctor
 
 CLI work:
 
-- [ ] Define stable exit codes in `docs/cli-contract.md`.
+- [x] Define stable exit codes in `docs/cli-contract.md`.
 - [ ] Define JSON document schemas for every command.
 - [ ] Define JSONL event schemas for long operations.
-- [ ] Add golden tests for help text, JSON output, JSONL event order, and exit
+- [x] Add golden tests for help text, JSON output, JSONL event order, and exit
       codes.
 - [ ] Ensure progress bars never appear in stdout data modes.
 - [ ] Ensure `--dry-run` exists for destructive commands.
@@ -279,7 +285,7 @@ restore, automate, and install across the supported platform list.
 
 Minimum v1 bar:
 
-- [ ] Rust workspace exists with the target crate boundaries.
+- [x] Rust workspace exists with the target crate boundaries.
 - [ ] `sealport init` creates encrypted local and S3-compatible repositories.
 - [ ] `sealport backup` creates encrypted, compressed, deduplicated snapshots.
 - [ ] `sealport restore` restores by snapshot id, tag, path, and `latest`.
@@ -332,13 +338,13 @@ where documented verification passes on a clean checkout.
 
 ### Phase 2 - CLI, Config, And Output Contract
 
-- [ ] Implement config discovery and profiles.
-- [ ] Implement global flags and environment variable precedence.
-- [ ] Add typed config validation and redacted diagnostics.
-- [ ] Define stable event model for command progress.
-- [ ] Implement human, JSON, and JSONL output surfaces.
-- [ ] Add CLI golden tests.
-- [ ] Add `sealport completion`.
+- [x] Implement config discovery and profiles.
+- [x] Implement global flags and environment variable precedence.
+- [x] Add typed config validation and redacted diagnostics.
+- [x] Define stable event model for command progress.
+- [x] Implement human, JSON, and JSONL output surfaces.
+- [x] Add CLI golden tests.
+- [x] Add `sealport completion`.
 
 ### Phase 3 - Crypto And Format Design
 
@@ -513,6 +519,10 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-18 - Completed the Phase 2 CLI foundation: config discovery,
+  profiles, CLI/env/config precedence, typed config validation, redacted
+  diagnostics, JSON and JSONL envelopes, event names, shell completions, and
+  CLI golden tests. Added `docs/cli-contract.md`. Verified with `just check`.
 - 2026-05-17 - Bootstrapped the Rust workspace with the planned crate
   boundaries, workspace dependency policy, `sealport-cli` binary, basic
   `sealport version`, `just` recipes, and GitHub Actions CI. Verified with
