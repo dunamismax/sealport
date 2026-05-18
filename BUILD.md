@@ -67,6 +67,10 @@ application.
   output.
 - **tracing** for logs, spans, progress events, and redaction-aware
   diagnostics.
+- **tracing-subscriber** for the CLI/logging boundary once runtime logging
+  grows beyond the current command surface.
+- **figment** or **config** only if profile, environment, and file layering
+  outgrows the current explicit config loader.
 - **miette** or **color-eyre** for human-facing diagnostics after a short
   spike confirms the best fit.
 - **object_store** first for local/S3/object backends. Consider an optional
@@ -364,6 +368,8 @@ where documented verification passes on a clean checkout.
 - [x] Implement config discovery and profiles.
 - [x] Implement global flags and environment variable precedence.
 - [x] Add typed config validation and redacted diagnostics.
+- [ ] Revisit `figment` or `config` only if the current explicit loader
+      becomes harder to audit than a small dependency-backed layering model.
 - [x] Define stable event model for command progress.
 - [x] Implement human, JSON, and JSONL output surfaces.
 - [x] Add CLI golden tests.
@@ -476,6 +482,8 @@ where documented verification passes on a clean checkout.
 - [ ] Run adversarial corruption tests.
 - [ ] Run cross-platform metadata tests.
 - [ ] Audit logs and diagnostics for secret leakage.
+- [ ] Decide whether `tracing-subscriber` should own the final CLI logging
+      boundary before v1.
 - [ ] Audit JSON/JSONL stability.
 - [ ] Update README, docs, completions, and release notes.
 - [ ] Tag v1 only after the exact release candidate passes the evidence path.
