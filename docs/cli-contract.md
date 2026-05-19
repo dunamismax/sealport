@@ -476,7 +476,9 @@ writes. The command fails if a destination file already exists unless
 regular-file, and symlink entries is preflighted before any destination writes
 begin. Restored symlink destination paths and symlinked ancestors are rejected
 if they already exist; symlinks are created after directory and regular-file
-writes so restore writes do not traverse newly restored symlinks. `--dry-run`
+writes so restore writes do not traverse newly restored symlinks. A
+path-scoped symlink restore creates missing parent directories under the
+destination root after destination safety preflight. `--dry-run`
 reports selected entries and planned writes without creating destination
 entries. It also reports
 `metadata_planned`, the count of regular-file and directory modified timestamp

@@ -313,6 +313,58 @@ fn restore_writes_directory_entries_and_symlinks_from_committed_snapshot() {
 }
 
 #[test]
+#[cfg(unix)]
+fn restore_path_scoped_symlink_creates_missing_parent_directory() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir_all(source.join("links")).expect("create source links dir");
+    fs::write(source.join("target.txt"), b"target").expect("write target");
+    symlink("../target.txt", source.join("links/target.link")).expect("create symlink");
+    let backup = backup_source(&repo_url, passphrase, &source);
+
+    let destination = temp.path().join("restore");
+    let restore_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "restore",
+            "--path",
+            "links/target.link",
+            destination.to_str().expect("destination path"),
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let restore: Value = serde_json::from_slice(&restore_output).expect("restore json");
+
+    assert_eq!(
+        restore["data"]["snapshot_id"],
+        backup["data"]["snapshot_id"]
+    );
+    assert_eq!(restore["data"]["entries_selected"], 1);
+    assert_eq!(restore["data"]["directories_written"], 0);
+    assert_eq!(restore["data"]["files_written"], 0);
+    assert_eq!(restore["data"]["symlinks_written"], 1);
+    assert!(destination.join("links").is_dir());
+    assert_eq!(
+        fs::read_link(destination.join("links/target.link")).expect("restored symlink"),
+        std::path::PathBuf::from("../target.txt")
+    );
+}
+
+#[test]
 fn restore_jsonl_emits_progress_events_without_stderr() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");

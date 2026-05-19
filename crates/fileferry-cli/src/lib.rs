@@ -990,6 +990,9 @@ fn core_failure_object_key(error: &CoreError) -> Option<String> {
         CoreError::ObjectDecode { key, .. }
         | CoreError::ObjectAuthentication { key, .. }
         | CoreError::MetadataDecode { key, .. }
+        | CoreError::MetadataIdentityMismatch {
+            object_key: key, ..
+        }
         | CoreError::InvalidSnapshotManifest {
             object_key: key, ..
         }
@@ -2302,6 +2305,34 @@ mod tests {
         assert_eq!(
             failure["data"]["finding"]["object_key"],
             "objects/manifest/ab/abcdef"
+        );
+    }
+
+    #[test]
+    fn check_failure_finding_preserves_metadata_identity_object_key() {
+        let object_key =
+            fileferry_storage::ObjectKey::new("objects/index/ab/abcdef").expect("object key");
+        let error = CliError::Core(Box::new(CoreError::MetadataIdentityMismatch {
+            kind: "chunk index",
+            object_key,
+            expected: "abcdef".to_owned(),
+            actual: "123456".to_owned(),
+        }));
+        let output = render_error_output(OutputMode::Json, "check", &error, 6)
+            .expect("render check failure");
+        let failure: serde_json::Value =
+            serde_json::from_str(&output.stdout).expect("failure json");
+
+        assert_eq!(output.stderr, "");
+        assert_eq!(output.exit_code, 6);
+        assert_eq!(
+            failure["data"]["code"],
+            "repository_metadata_identity_mismatch"
+        );
+        assert_eq!(failure["data"]["object_key"], "objects/index/ab/abcdef");
+        assert_eq!(
+            failure["data"]["finding"]["object_key"],
+            "objects/index/ab/abcdef"
         );
     }
 

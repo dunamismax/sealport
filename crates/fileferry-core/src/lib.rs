@@ -159,9 +159,12 @@ pub enum CoreError {
         source: serde_json::Error,
     },
 
-    #[error("{kind} metadata identity mismatch: expected {expected}, found {actual}")]
+    #[error(
+        "{kind} metadata object {object_key} identity mismatch: expected {expected}, found {actual}"
+    )]
     MetadataIdentityMismatch {
         kind: &'static str,
+        object_key: ObjectKey,
         expected: String,
         actual: String,
     },
@@ -1047,6 +1050,7 @@ impl BackupPipeline {
         if manifest.snapshot_id != snapshot_id {
             return Err(CoreError::MetadataIdentityMismatch {
                 kind: "snapshot manifest",
+                object_key: object_key.clone(),
                 expected: snapshot_id.to_owned(),
                 actual: manifest.snapshot_id,
             });
@@ -1054,6 +1058,7 @@ impl BackupPipeline {
         if actual != snapshot_id {
             return Err(CoreError::MetadataIdentityMismatch {
                 kind: "snapshot manifest",
+                object_key: object_key.clone(),
                 expected: snapshot_id.to_owned(),
                 actual,
             });
@@ -1157,6 +1162,7 @@ impl BackupPipeline {
         if index.index_id != index_id {
             return Err(CoreError::MetadataIdentityMismatch {
                 kind: "chunk index",
+                object_key: object_key.clone(),
                 expected: index_id.to_owned(),
                 actual: index.index_id,
             });
@@ -1164,6 +1170,7 @@ impl BackupPipeline {
         if actual != index_id {
             return Err(CoreError::MetadataIdentityMismatch {
                 kind: "chunk index",
+                object_key: object_key.clone(),
                 expected: index_id.to_owned(),
                 actual,
             });
@@ -1414,6 +1421,7 @@ impl BackupPipeline {
         if manifest.snapshot_id != snapshot_id {
             return Err(CoreError::MetadataIdentityMismatch {
                 kind: "snapshot manifest",
+                object_key: object_key.clone(),
                 expected: snapshot_id.to_owned(),
                 actual: manifest.snapshot_id,
             });
@@ -1421,6 +1429,7 @@ impl BackupPipeline {
         if actual != snapshot_id {
             return Err(CoreError::MetadataIdentityMismatch {
                 kind: "snapshot manifest",
+                object_key: object_key.clone(),
                 expected: snapshot_id.to_owned(),
                 actual,
             });
@@ -1458,6 +1467,7 @@ impl BackupPipeline {
         if index.index_id != index_id {
             return Err(CoreError::MetadataIdentityMismatch {
                 kind: "chunk index",
+                object_key: object_key.clone(),
                 expected: index_id.to_owned(),
                 actual: index.index_id,
             });
@@ -1465,6 +1475,7 @@ impl BackupPipeline {
         if actual != index_id {
             return Err(CoreError::MetadataIdentityMismatch {
                 kind: "chunk index",
+                object_key: object_key.clone(),
                 expected: index_id.to_owned(),
                 actual,
             });
@@ -2709,6 +2720,13 @@ fn set_restored_modified_timestamp(
 
 #[cfg(unix)]
 fn create_restored_symlink(target: &Path, destination_path: &Path) -> CoreResult<()> {
+    if let Some(parent) = destination_path.parent() {
+        fs::create_dir_all(parent).map_err(|source| CoreError::RestoreDestinationWrite {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+
     std::os::unix::fs::symlink(target, destination_path).map_err(|source| {
         CoreError::RestoreDestinationWrite {
             path: destination_path.to_path_buf(),
@@ -4512,6 +4530,64 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restore_snapshot_to_destination_path_scoped_symlink_creates_missing_parent_directory()
+    {
+        use fileferry_testkit::FakeObjectStore;
+        use std::os::unix::fs::symlink;
+
+        let source = tempfile::tempdir().expect("source tempdir");
+        let destination = tempfile::tempdir().expect("destination tempdir");
+        let restore_root = destination.path().join("restored");
+        fs::create_dir_all(source.path().join("links")).expect("create links dir");
+        fs::write(source.path().join("target.txt"), b"target").expect("write target");
+        symlink("../target.txt", source.path().join("links/target.link"))
+            .expect("create nested symlink");
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+
+        let restored = pipeline
+            .restore_snapshot_to_destination(
+                &store,
+                &master_key,
+                RestoreDestinationRequest {
+                    snapshot_id: result.snapshot_id,
+                    paths: vec![PathBuf::from("links/target.link")],
+                    destination: restore_root.clone(),
+                    overwrite: RestoreOverwritePolicy::FailIfExists,
+                    dry_run: false,
+                    verify: true,
+                },
+            )
+            .await
+            .expect("path-scoped symlink restore");
+
+        assert_eq!(restored.selected_entries, 1);
+        assert_eq!(restored.directories.len(), 0);
+        assert_eq!(restored.files.len(), 0);
+        assert_eq!(restored.symlinks.len(), 1);
+        assert!(restore_root.join("links").is_dir());
+        assert_eq!(
+            fs::read_link(restore_root.join("links/target.link")).expect("restored symlink"),
+            PathBuf::from("../target.txt")
+        );
+    }
+
     #[tokio::test]
     async fn restore_snapshot_to_destination_dry_run_reports_without_writes() {
         use fileferry_testkit::FakeObjectStore;
@@ -5016,8 +5092,9 @@ mod tests {
             replayed_error,
             CoreError::MetadataIdentityMismatch {
                 kind: "chunk index",
+                object_key,
                 ..
-            }
+            } if object_key == result.index_object
         ));
 
         let manifest_key = master_key

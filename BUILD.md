@@ -42,12 +42,13 @@ Last reviewed: 2026-05-18.
   for regular files, preflights destination safety for selected directories,
   regular files, and symlinks before destination writes, rejects requested
   snapshot-relative restore paths that do not match manifest entries before
-  destination writes, supports dry-run reporting including planned modified
-  timestamp metadata and timestamp planning warnings, returns partial-success
-  exit code `10` when metadata warnings are produced, and exposes tested human,
-  JSON, and JSONL-safe output paths. Authenticated manifests with invalid
-  entry topology are rejected as integrity failures before restore destination
-  writes.
+  destination writes, creates missing parent directories for path-scoped
+  symlink restores after destination safety preflight, supports dry-run
+  reporting including planned modified timestamp metadata and timestamp
+  planning warnings, returns partial-success exit code `10` when metadata
+  warnings are produced, and exposes tested human, JSON, and JSONL-safe output
+  paths. Authenticated manifests with invalid entry topology are rejected as
+  integrity failures before restore destination writes.
 - `ferry check` opens initialized local repositories, unlocks with
   `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed
   manifests and chunk indexes, reads/decompresses every referenced chunk, and
@@ -64,7 +65,8 @@ Last reviewed: 2026-05-18.
   duplicate entry paths, non-file chunk references, regular-file
   size/chunk-length mismatches, and non-directory ancestors are reported as
   integrity failures with snapshot id, object key, and path context where
-  available.
+  available. Metadata identity mismatches retain the repository object key in
+  CLI machine-readable failure output.
 - CLI config discovery, profiles, environment precedence, redacted
   diagnostics, and machine-output envelopes exist for the current command
   surface.
@@ -631,6 +633,22 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-19 - Tightened path-scoped Unix symlink restore and check identity
+  diagnostics without expanding metadata or platform claims. Path-scoped
+  symlink restores now create missing destination parent directories after
+  destination safety preflight, matching regular-file parent handling while
+  still rejecting existing symlink paths and symlinked ancestors.
+  `fileferry-core` metadata identity mismatches now carry the repository object
+  key, and `fileferry-cli` includes that key in JSON/JSONL check failure
+  envelopes and `CheckFinding` details. Documented the path-scoped symlink
+  behavior in `docs/cli-contract.md`. Verified initially with `cargo test -p
+  fileferry-core path_scoped_symlink`, `cargo test -p fileferry-cli
+  restore_path_scoped_symlink_creates_missing_parent_directory`, `cargo test -p
+  fileferry-core repository_metadata_reads_reject_replayed_indexes_and_malformed_metadata`,
+  and `cargo test -p fileferry-cli
+  check_failure_finding_preserves_metadata_identity_object_key`; then with
+  `cargo test -p fileferry-core -p fileferry-cli`, `just fmt`, `just check`,
+  `just test`, `just build`, and `git diff --check`.
 - 2026-05-19 - Tightened authenticated manifest validation before restore and
   check work without broadening repository format claims. `fileferry-core` now
   rejects decrypted manifests with invalid snapshot-relative entry paths,
