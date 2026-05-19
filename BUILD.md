@@ -45,7 +45,9 @@ Last reviewed: 2026-05-18.
   destination writes, supports dry-run reporting including planned modified
   timestamp metadata and timestamp planning warnings, returns partial-success
   exit code `10` when metadata warnings are produced, and exposes tested human,
-  JSON, and JSONL-safe output paths.
+  JSON, and JSONL-safe output paths. Authenticated manifests with invalid
+  entry topology are rejected as integrity failures before restore destination
+  writes.
 - `ferry check` opens initialized local repositories, unlocks with
   `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed
   manifests and chunk indexes, reads/decompresses every referenced chunk, and
@@ -58,7 +60,11 @@ Last reviewed: 2026-05-18.
   failures. Configurable subset checks are not implemented yet.
   Manifest/index chunk-reference mismatches and chunk decompression failures
   now retain snapshot-relative path, snapshot id, and object-key context where
-  committed metadata provides it.
+  committed metadata provides it. Invalid decrypted manifest entry paths,
+  duplicate entry paths, non-file chunk references, regular-file
+  size/chunk-length mismatches, and non-directory ancestors are reported as
+  integrity failures with snapshot id, object key, and path context where
+  available.
 - CLI config discovery, profiles, environment precedence, redacted
   diagnostics, and machine-output envelopes exist for the current command
   surface.
@@ -625,6 +631,21 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-19 - Tightened authenticated manifest validation before restore and
+  check work without broadening repository format claims. `fileferry-core` now
+  rejects decrypted manifests with invalid snapshot-relative entry paths,
+  duplicate entry paths, non-file chunk references, regular-file
+  size/chunk-length mismatches, or child entries whose recorded ancestor is not
+  a directory. Restore rejects those manifests before destination writes, and
+  `ferry check` reports them as integrity failures with snapshot id, manifest
+  object key, and path context where available. `fileferry-cli` maps the new
+  `snapshot_manifest_invalid` failure to exit code `6` and includes the
+  context in check JSON/JSONL finding envelopes. Documented the behavior in
+  `docs/cli-contract.md` and `docs/repository-format.md`. Verified initially
+  with `cargo test -p fileferry-core invalid_manifest` and `cargo test -p
+  fileferry-cli check_failure_finding_preserves`, then with `cargo test -p
+  fileferry-core`, `cargo test -p fileferry-cli`, and the full `just fmt`,
+  `just check`, `just test`, `just build`, and `git diff --check` gate.
 - 2026-05-18 - Tightened restore destination safety without broadening restore
   scope. `fileferry-core` now preflights destination safety for all selected
   directories, regular files, and symlinks before any non-dry-run destination

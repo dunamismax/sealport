@@ -504,7 +504,10 @@ integrity failures, a `finding` object shaped like `CheckFinding`. Encrypted
 object authentication failures retain the repository object key when the
 failing object is known. Chunk-reference integrity failures retain the
 snapshot-relative path, snapshot id, and object key when the committed manifest
-provides that context.
+provides that context. Decrypted manifests with invalid entry paths, duplicate
+entry paths, non-file chunk references, regular-file size/chunk-length
+mismatches, or non-directory ancestors fail as `snapshot_manifest_invalid`
+integrity errors with snapshot id, object key, and path context when available.
 Configurable subset checks are not implemented yet.
 
 `ferry snapshots` opens an initialized local repository with

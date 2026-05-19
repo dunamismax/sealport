@@ -141,6 +141,13 @@ Manifest records must not store plaintext paths, tags, usernames, hostnames, or
 directory shape. Restore code must authenticate and parse the manifest before
 presenting any decrypted metadata to the user.
 
+Current format-v0 readers also validate decrypted manifest entry structure
+before restore writes or check data reads. Entry paths must be normalized
+snapshot-relative paths, duplicate entry paths are rejected, non-file entries
+must not contain chunk references, captured regular-file sizes must match the
+sum of referenced chunk lengths, and any recorded ancestor entry for a child
+must be a directory. Violations are treated as integrity failures.
+
 ## Chunk Index
 
 Chunk indexes are encrypted metadata objects that map chunk identities to object

@@ -209,6 +209,14 @@ pub enum CoreError {
     #[error("snapshot path {path} was not found in snapshot {snapshot_id}")]
     SnapshotPathNotFound { snapshot_id: String, path: PathBuf },
 
+    #[error("snapshot manifest {object_key} for snapshot {snapshot_id} is invalid: {reason}")]
+    InvalidSnapshotManifest {
+        snapshot_id: String,
+        object_key: ObjectKey,
+        path: Option<PathBuf>,
+        reason: &'static str,
+    },
+
     #[error("restore request is invalid: {reason}")]
     InvalidRestoreRequest { reason: &'static str },
 
@@ -1050,6 +1058,7 @@ impl BackupPipeline {
                 actual,
             });
         }
+        validate_snapshot_manifest(&manifest, &object_key)?;
 
         Ok(manifest)
     }
@@ -1416,6 +1425,7 @@ impl BackupPipeline {
                 actual,
             });
         }
+        validate_snapshot_manifest(&manifest, &object_key)?;
 
         Ok((manifest, bytes_read))
     }
@@ -2733,6 +2743,128 @@ fn scoped_manifest_entries<'a>(
         .collect()
 }
 
+fn validate_snapshot_manifest(
+    manifest: &SnapshotManifest,
+    object_key: &ObjectKey,
+) -> CoreResult<()> {
+    let mut entry_kinds = BTreeMap::new();
+
+    for entry in &manifest.body.entries {
+        validate_manifest_entry_path(manifest, object_key, &entry.relative_path)?;
+
+        if entry.relative_path.as_os_str().is_empty() && entry.metadata.kind != EntryKind::Directory
+        {
+            return Err(CoreError::InvalidSnapshotManifest {
+                snapshot_id: manifest.snapshot_id.clone(),
+                object_key: object_key.clone(),
+                path: Some(entry.relative_path.clone()),
+                reason: "root entry is not a directory",
+            });
+        }
+
+        if entry_kinds
+            .insert(entry.relative_path.clone(), entry.metadata.kind.clone())
+            .is_some()
+        {
+            return Err(CoreError::InvalidSnapshotManifest {
+                snapshot_id: manifest.snapshot_id.clone(),
+                object_key: object_key.clone(),
+                path: Some(entry.relative_path.clone()),
+                reason: "duplicate entry path",
+            });
+        }
+
+        if entry.metadata.kind != EntryKind::RegularFile && !entry.chunks.is_empty() {
+            return Err(CoreError::InvalidSnapshotManifest {
+                snapshot_id: manifest.snapshot_id.clone(),
+                object_key: object_key.clone(),
+                path: Some(entry.relative_path.clone()),
+                reason: "non-file entry contains chunk references",
+            });
+        }
+
+        if let (EntryKind::RegularFile, Some(size_bytes)) =
+            (&entry.metadata.kind, entry.metadata.size_bytes)
+        {
+            let chunk_bytes = entry
+                .chunks
+                .iter()
+                .try_fold(0_u64, |total, chunk| total.checked_add(chunk.length))
+                .ok_or_else(|| CoreError::InvalidSnapshotManifest {
+                    snapshot_id: manifest.snapshot_id.clone(),
+                    object_key: object_key.clone(),
+                    path: Some(entry.relative_path.clone()),
+                    reason: "regular-file chunk lengths overflow",
+                })?;
+            if chunk_bytes != size_bytes {
+                return Err(CoreError::InvalidSnapshotManifest {
+                    snapshot_id: manifest.snapshot_id.clone(),
+                    object_key: object_key.clone(),
+                    path: Some(entry.relative_path.clone()),
+                    reason: "regular-file chunk lengths do not match captured size",
+                });
+            }
+        }
+    }
+
+    for entry in &manifest.body.entries {
+        for ancestor in entry.relative_path.ancestors().skip(1) {
+            if ancestor.as_os_str().is_empty() {
+                break;
+            }
+
+            if entry_kinds
+                .get(ancestor)
+                .is_some_and(|kind| kind != &EntryKind::Directory)
+            {
+                return Err(CoreError::InvalidSnapshotManifest {
+                    snapshot_id: manifest.snapshot_id.clone(),
+                    object_key: object_key.clone(),
+                    path: Some(entry.relative_path.clone()),
+                    reason: "entry has a non-directory ancestor",
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_manifest_entry_path(
+    manifest: &SnapshotManifest,
+    object_key: &ObjectKey,
+    path: &Path,
+) -> CoreResult<()> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(segment) => normalized.push(segment),
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return Err(CoreError::InvalidSnapshotManifest {
+                    snapshot_id: manifest.snapshot_id.clone(),
+                    object_key: object_key.clone(),
+                    path: Some(path.to_path_buf()),
+                    reason: "entry path is not a normalized relative path",
+                });
+            }
+        }
+    }
+
+    if normalized != path {
+        return Err(CoreError::InvalidSnapshotManifest {
+            snapshot_id: manifest.snapshot_id.clone(),
+            object_key: object_key.clone(),
+            path: Some(path.to_path_buf()),
+            reason: "entry path is not a normalized relative path",
+        });
+    }
+
+    Ok(())
+}
+
 fn validate_indexed_chunk_reference(
     snapshot_id: &str,
     path: &Path,
@@ -3024,6 +3156,64 @@ mod tests {
             repository_id: "repo-test-id".to_owned(),
         })
         .expect("pipeline")
+    }
+
+    async fn replace_committed_manifest_for_tests(
+        pipeline: &BackupPipeline,
+        store: &fileferry_testkit::FakeObjectStore,
+        master_key: &MasterKey,
+        result: &SnapshotWriteResult,
+        mutate: impl FnOnce(&mut SnapshotManifest),
+    ) -> (String, ObjectKey) {
+        let repository_context = pipeline.config().repository_id.as_bytes();
+        let mut manifest = pipeline
+            .read_snapshot_manifest(store, master_key, &result.snapshot_id)
+            .await
+            .expect("manifest read");
+        mutate(&mut manifest);
+
+        let new_snapshot_id = content_id_for_metadata(
+            master_key,
+            KeyPurpose::SnapshotMetadata,
+            repository_context,
+            &manifest.body,
+        )
+        .expect("new snapshot id");
+        manifest.snapshot_id = new_snapshot_id.clone();
+        let manifest_object =
+            object_key_for_id("objects/manifest", &new_snapshot_id).expect("manifest object key");
+        let manifest_key = master_key
+            .derive_subkey(KeyPurpose::SnapshotMetadata, repository_context)
+            .expect("manifest key");
+        let manifest_bytes = encrypt_repository_object(
+            &manifest_key,
+            ObjectKind::SnapshotManifest,
+            &manifest_object,
+            &serde_json::to_vec(&manifest).expect("manifest json"),
+        )
+        .expect("encrypted manifest");
+        store
+            .overwrite_for_tests(manifest_object.clone(), manifest_bytes)
+            .await;
+
+        store
+            .delete(&result.commit_object)
+            .await
+            .expect("delete old commit");
+        let commit_object = object_key_for_commit(&new_snapshot_id).expect("new commit object key");
+        let commit = SnapshotCommit {
+            schema_version: 0,
+            snapshot_id: new_snapshot_id.clone(),
+            manifest_object: manifest_object.as_str().to_owned(),
+        };
+        store
+            .overwrite_for_tests(
+                commit_object,
+                serde_json::to_vec(&commit).expect("commit json"),
+            )
+            .await;
+
+        (new_snapshot_id, manifest_object)
     }
 
     #[tokio::test]
@@ -3730,6 +3920,63 @@ mod tests {
                 && snapshot_id == result.snapshot_id
                 && path == Path::new("sample.txt")
                 && object_key == referenced_chunk.object_key
+        ));
+    }
+
+    #[tokio::test]
+    async fn check_repository_rejects_invalid_manifest_entry_paths_with_context() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("one.txt"), b"one").expect("write one");
+        fs::write(temp.path().join("two.txt"), b"two").expect("write two");
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![temp.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+        let (snapshot_id, manifest_object) = replace_committed_manifest_for_tests(
+            &pipeline,
+            &store,
+            &master_key,
+            &result,
+            |manifest| {
+                let two = manifest
+                    .body
+                    .entries
+                    .iter_mut()
+                    .find(|entry| entry.relative_path == Path::new("two.txt"))
+                    .expect("second entry");
+                two.relative_path = PathBuf::from("one.txt");
+            },
+        )
+        .await;
+
+        let error = pipeline
+            .check_repository(&store, &master_key)
+            .await
+            .expect_err("duplicate manifest path should fail check");
+
+        assert!(matches!(
+            error,
+            CoreError::InvalidSnapshotManifest {
+                snapshot_id: error_snapshot_id,
+                object_key,
+                path: Some(path),
+                reason: "duplicate entry path",
+            } if error_snapshot_id == snapshot_id
+                && object_key == manifest_object
+                && path == Path::new("one.txt")
         ));
     }
 
@@ -4491,6 +4738,77 @@ mod tests {
             fs::read(destination.path().join("conflict.txt")).expect("existing file"),
             b"old"
         );
+    }
+
+    #[tokio::test]
+    async fn restore_snapshot_to_destination_rejects_invalid_manifest_topology_before_writes() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let source = tempfile::tempdir().expect("source tempdir");
+        let destination = tempfile::tempdir().expect("destination tempdir");
+        fs::write(source.path().join("file.txt"), b"file").expect("write file");
+        fs::write(source.path().join("child.txt"), b"child").expect("write child");
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let result = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .await
+            .expect("snapshot write");
+        let (snapshot_id, manifest_object) = replace_committed_manifest_for_tests(
+            &pipeline,
+            &store,
+            &master_key,
+            &result,
+            |manifest| {
+                let child = manifest
+                    .body
+                    .entries
+                    .iter_mut()
+                    .find(|entry| entry.relative_path == Path::new("child.txt"))
+                    .expect("child entry");
+                child.relative_path = PathBuf::from("file.txt/child.txt");
+            },
+        )
+        .await;
+
+        let error = pipeline
+            .restore_snapshot_to_destination(
+                &store,
+                &master_key,
+                RestoreDestinationRequest {
+                    snapshot_id: snapshot_id.clone(),
+                    paths: Vec::new(),
+                    destination: destination.path().join("restore"),
+                    overwrite: RestoreOverwritePolicy::FailIfExists,
+                    dry_run: false,
+                    verify: true,
+                },
+            )
+            .await
+            .expect_err("invalid manifest topology should block restore");
+
+        assert!(matches!(
+            error,
+            CoreError::InvalidSnapshotManifest {
+                snapshot_id: error_snapshot_id,
+                object_key,
+                path: Some(path),
+                reason: "entry has a non-directory ancestor",
+            } if error_snapshot_id == snapshot_id
+                && object_key == manifest_object
+                && path == Path::new("file.txt/child.txt")
+        ));
+        assert!(!destination.path().join("restore").exists());
     }
 
     #[cfg(unix)]

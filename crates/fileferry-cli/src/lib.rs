@@ -257,6 +257,7 @@ fn core_exit_code(error: &CoreError) -> i32 {
         CoreError::SnapshotNotFound { .. } | CoreError::SnapshotPathNotFound { .. } => 7,
         CoreError::RepositoryBootstrapDecode { .. }
         | CoreError::InvalidRepositoryBootstrap { .. }
+        | CoreError::InvalidSnapshotManifest { .. }
         | CoreError::CommitDecode { .. }
         | CoreError::InvalidCommitMarker { .. }
         | CoreError::MetadataIdentityMismatch { .. }
@@ -853,6 +854,7 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::RepositoryUnlock { .. } => "repository_unlock_failed",
         CoreError::SnapshotNotFound { .. } => "snapshot_not_found",
         CoreError::SnapshotPathNotFound { .. } => "snapshot_path_not_found",
+        CoreError::InvalidSnapshotManifest { .. } => "snapshot_manifest_invalid",
         CoreError::InvalidRestoreRequest { .. } => "restore_request_invalid",
         CoreError::RestoreDestinationNotAbsolute { .. } => "restore_destination_not_absolute",
         CoreError::RestoreDestinationEscapesRoot { .. } => "restore_destination_escapes_root",
@@ -938,6 +940,9 @@ fn core_failure_path(error: &CoreError) -> Option<String> {
         CoreError::SourceRootNotAbsolute { path }
         | CoreError::InvalidChunkRange { path }
         | CoreError::SnapshotPathNotFound { path, .. }
+        | CoreError::InvalidSnapshotManifest {
+            path: Some(path), ..
+        }
         | CoreError::MissingChunkIndexEntry { path, .. }
         | CoreError::ChunkIndexMismatch { path, .. }
         | CoreError::RestoreDestinationNotAbsolute { path }
@@ -985,6 +990,9 @@ fn core_failure_object_key(error: &CoreError) -> Option<String> {
         CoreError::ObjectDecode { key, .. }
         | CoreError::ObjectAuthentication { key, .. }
         | CoreError::MetadataDecode { key, .. }
+        | CoreError::InvalidSnapshotManifest {
+            object_key: key, ..
+        }
         | CoreError::CommitDecode { key, .. }
         | CoreError::InvalidCommitMarker { key, .. }
         | CoreError::RepositoryCheckMissingObject { key }
@@ -1017,7 +1025,8 @@ fn core_failure_object_key(error: &CoreError) -> Option<String> {
 fn core_failure_snapshot_id(error: &CoreError) -> Option<String> {
     match error {
         CoreError::MissingChunkIndexEntry { snapshot_id, .. }
-        | CoreError::ChunkIndexMismatch { snapshot_id, .. } => Some(snapshot_id.clone()),
+        | CoreError::ChunkIndexMismatch { snapshot_id, .. }
+        | CoreError::InvalidSnapshotManifest { snapshot_id, .. } => Some(snapshot_id.clone()),
         CoreError::Decompression {
             snapshot_id: Some(snapshot_id),
             ..
@@ -1041,6 +1050,7 @@ fn check_finding_for_core_error(error: &CoreError) -> Option<fileferry_core::Che
         | CoreError::ObjectDecode { .. }
         | CoreError::ObjectAuthentication { .. }
         | CoreError::MetadataDecode { .. }
+        | CoreError::InvalidSnapshotManifest { .. }
         | CoreError::MetadataIdentityMismatch { .. }
         | CoreError::CommitDecode { .. }
         | CoreError::InvalidCommitMarker { .. }
@@ -2264,6 +2274,34 @@ mod tests {
         assert_eq!(
             failure["data"]["finding"]["object_key"],
             "objects/chunk/ab/chunk-123"
+        );
+    }
+
+    #[test]
+    fn check_failure_finding_preserves_invalid_manifest_context() {
+        let object_key =
+            fileferry_storage::ObjectKey::new("objects/manifest/ab/abcdef").expect("object key");
+        let error = CliError::Core(Box::new(CoreError::InvalidSnapshotManifest {
+            snapshot_id: "snapshot-abc".to_owned(),
+            object_key,
+            path: Some(PathBuf::from("docs/sample.txt")),
+            reason: "duplicate entry path",
+        }));
+        let output = render_error_output(OutputMode::Json, "check", &error, 6)
+            .expect("render check failure");
+        let failure: serde_json::Value =
+            serde_json::from_str(&output.stdout).expect("failure json");
+
+        assert_eq!(output.stderr, "");
+        assert_eq!(output.exit_code, 6);
+        assert_eq!(failure["data"]["code"], "snapshot_manifest_invalid");
+        assert_eq!(failure["data"]["path"], "docs/sample.txt");
+        assert_eq!(failure["data"]["object_key"], "objects/manifest/ab/abcdef");
+        assert_eq!(failure["data"]["finding"]["snapshot_id"], "snapshot-abc");
+        assert_eq!(failure["data"]["finding"]["path"], "docs/sample.txt");
+        assert_eq!(
+            failure["data"]["finding"]["object_key"],
+            "objects/manifest/ab/abcdef"
         );
     }
 
