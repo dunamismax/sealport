@@ -37,6 +37,8 @@ fn top_level_help_lists_stable_global_flags_and_commands() {
                 .and(predicates::str::contains("restore"))
                 .and(predicates::str::contains("snapshots"))
                 .and(predicates::str::contains("ls"))
+                .and(predicates::str::contains("check"))
+                .and(predicates::str::contains("forget"))
                 .and(predicates::str::contains("version")),
         )
         .stderr("");

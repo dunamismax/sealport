@@ -15,7 +15,7 @@ use fileferry_storage::{ObjectKey, ObjectKeyPrefix, ObjectStore, PutStatus, Stor
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs, io,
     path::Component,
     path::{Path, PathBuf},
@@ -211,6 +211,22 @@ pub enum CoreError {
 
     #[error("snapshot selection {selection} did not match any loaded snapshot")]
     SnapshotNotFound { selection: String },
+
+    #[error("forget policy did not select any snapshots to forget")]
+    ForgetNoSnapshotsMatched,
+
+    #[error("snapshot forget marker {key} could not be decoded")]
+    ForgetMarkerDecode {
+        key: ObjectKey,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("snapshot forget marker {key} is invalid: {reason}")]
+    InvalidForgetMarker {
+        key: ObjectKey,
+        reason: &'static str,
+    },
 
     #[error("snapshot path {path} was not found in snapshot {snapshot_id}")]
     SnapshotPathNotFound { snapshot_id: String, path: PathBuf },
@@ -1076,6 +1092,7 @@ impl BackupPipeline {
         store: &dyn ObjectStore,
         master_key: &MasterKey,
     ) -> CoreResult<Vec<SnapshotManifest>> {
+        let forgotten_snapshot_ids = self.read_forgotten_snapshot_ids(store).await?;
         let prefix =
             ObjectKeyPrefix::new("commits").map_err(|source| CoreError::ObjectKey { source })?;
         let mut commit_keys = store
@@ -1087,6 +1104,9 @@ impl BackupPipeline {
         let mut manifests = Vec::with_capacity(commit_keys.len());
         for commit_key in commit_keys {
             let commit = self.read_snapshot_commit(store, &commit_key).await?;
+            if forgotten_snapshot_ids.contains(&commit.snapshot_id) {
+                continue;
+            }
             let expected_commit_key = object_key_for_commit(&commit.snapshot_id)?;
             if expected_commit_key != commit_key {
                 return Err(CoreError::InvalidCommitMarker {
@@ -1117,6 +1137,71 @@ impl BackupPipeline {
         Ok(manifests)
     }
 
+    pub async fn read_forgotten_snapshot_ids(
+        &self,
+        store: &dyn ObjectStore,
+    ) -> CoreResult<BTreeSet<String>> {
+        let prefix =
+            ObjectKeyPrefix::new("forgets").map_err(|source| CoreError::ObjectKey { source })?;
+        let mut marker_keys = store
+            .list_prefix(&prefix)
+            .await
+            .map_err(|source| CoreError::Storage { source })?;
+        marker_keys.sort();
+
+        let mut snapshot_ids = BTreeSet::new();
+        for marker_key in marker_keys {
+            let marker = self.read_snapshot_forget_marker(store, &marker_key).await?;
+            snapshot_ids.insert(marker.snapshot_id);
+        }
+
+        Ok(snapshot_ids)
+    }
+
+    pub async fn write_snapshot_forget_markers(
+        &self,
+        store: &dyn ObjectStore,
+        snapshot_ids: &[String],
+    ) -> CoreResult<SnapshotForgetWriteResult> {
+        if snapshot_ids.is_empty() {
+            return Err(CoreError::ForgetNoSnapshotsMatched);
+        }
+
+        let forgotten_at_unix_seconds = current_unix_seconds()?;
+        let mut markers = Vec::with_capacity(snapshot_ids.len());
+        let mut unique_snapshot_ids = snapshot_ids.to_vec();
+        unique_snapshot_ids.sort();
+        unique_snapshot_ids.dedup();
+
+        for snapshot_id in unique_snapshot_ids {
+            let marker_object = object_key_for_forget_marker(&snapshot_id)?;
+            let marker = SnapshotForgetMarker {
+                schema_version: 0,
+                snapshot_id: snapshot_id.clone(),
+                manifest_object: object_key_for_id("objects/manifest", &snapshot_id)?
+                    .as_str()
+                    .to_owned(),
+                commit_object: object_key_for_commit(&snapshot_id)?.as_str().to_owned(),
+                forgotten_at_unix_seconds,
+            };
+            let marker_bytes = serde_json::to_vec(&marker)
+                .map_err(|source| CoreError::Serialization { source })?;
+            let created = store
+                .put_if_absent(&marker_object, &marker_bytes)
+                .await
+                .map_err(|source| CoreError::Storage { source })?
+                == PutStatus::Created;
+
+            markers.push(SnapshotForgetWrite {
+                snapshot_id,
+                marker_object: marker_object.as_str().to_owned(),
+                created,
+            });
+        }
+
+        Ok(SnapshotForgetWriteResult { markers })
+    }
+
     async fn read_snapshot_commit(
         &self,
         store: &dyn ObjectStore,
@@ -1140,6 +1225,55 @@ impl BackupPipeline {
         }
 
         Ok(commit)
+    }
+
+    async fn read_snapshot_forget_marker(
+        &self,
+        store: &dyn ObjectStore,
+        marker_key: &ObjectKey,
+    ) -> CoreResult<SnapshotForgetMarker> {
+        let bytes = store
+            .get(marker_key)
+            .await
+            .map_err(|source| CoreError::Storage { source })?;
+        let marker: SnapshotForgetMarker =
+            serde_json::from_slice(&bytes).map_err(|source| CoreError::ForgetMarkerDecode {
+                key: marker_key.clone(),
+                source,
+            })?;
+
+        if marker.schema_version != 0 {
+            return Err(CoreError::InvalidForgetMarker {
+                key: marker_key.clone(),
+                reason: "unsupported forget marker schema version",
+            });
+        }
+
+        let expected_marker_key = object_key_for_forget_marker(&marker.snapshot_id)?;
+        if expected_marker_key != *marker_key {
+            return Err(CoreError::InvalidForgetMarker {
+                key: marker_key.clone(),
+                reason: "forget marker object key does not match snapshot id",
+            });
+        }
+
+        let expected_manifest_object = object_key_for_id("objects/manifest", &marker.snapshot_id)?;
+        if marker.manifest_object != expected_manifest_object.as_str() {
+            return Err(CoreError::InvalidForgetMarker {
+                key: marker_key.clone(),
+                reason: "forget marker manifest object does not match snapshot id",
+            });
+        }
+
+        let expected_commit_object = object_key_for_commit(&marker.snapshot_id)?;
+        if marker.commit_object != expected_commit_object.as_str() {
+            return Err(CoreError::InvalidForgetMarker {
+                key: marker_key.clone(),
+                reason: "forget marker commit object does not match snapshot id",
+            });
+        }
+
+        Ok(marker)
     }
 
     pub async fn read_chunk_index(
@@ -1882,6 +2016,27 @@ pub struct SnapshotCommit {
     pub schema_version: u16,
     pub snapshot_id: String,
     pub manifest_object: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct SnapshotForgetMarker {
+    pub schema_version: u16,
+    pub snapshot_id: String,
+    pub manifest_object: String,
+    pub commit_object: String,
+    pub forgotten_at_unix_seconds: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SnapshotForgetWrite {
+    pub snapshot_id: String,
+    pub marker_object: String,
+    pub created: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SnapshotForgetWriteResult {
+    pub markers: Vec<SnapshotForgetWrite>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -3145,6 +3300,11 @@ fn object_key_for_commit(snapshot_id: &str) -> CoreResult<ObjectKey> {
         .map_err(|source| CoreError::ObjectKey { source })
 }
 
+fn object_key_for_forget_marker(snapshot_id: &str) -> CoreResult<ObjectKey> {
+    ObjectKey::new(format!("forgets/{snapshot_id}"))
+        .map_err(|source| CoreError::ObjectKey { source })
+}
+
 fn hex_bytes(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
@@ -4372,6 +4532,90 @@ mod tests {
         expected.sort();
 
         assert_eq!(ids, expected);
+    }
+
+    #[tokio::test]
+    async fn forget_markers_hide_snapshots_without_deleting_repository_objects() {
+        use fileferry_testkit::FakeObjectStore;
+
+        let first_source = tempfile::tempdir().expect("first tempdir");
+        let second_source = tempfile::tempdir().expect("second tempdir");
+        fs::write(first_source.path().join("first.txt"), b"first").expect("write first");
+        fs::write(second_source.path().join("second.txt"), b"second").expect("write second");
+
+        let pipeline = small_test_pipeline();
+        let store = FakeObjectStore::new();
+        let master_key = MasterKey::generate();
+        let first = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![first_source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: vec!["first".to_owned()],
+                },
+            )
+            .await
+            .expect("first snapshot write");
+        let second = pipeline
+            .write_snapshot(
+                &store,
+                &master_key,
+                BackupRequest {
+                    roots: vec![second_source.path().to_path_buf()],
+                    exclusion_rules: Vec::new(),
+                    tags: vec!["second".to_owned()],
+                },
+            )
+            .await
+            .expect("second snapshot write");
+        let commit_prefix = ObjectKeyPrefix::new("commits").expect("commit prefix");
+        let manifest_prefix = ObjectKeyPrefix::new("objects/manifest").expect("manifest prefix");
+        let commits_before = store
+            .list_prefix(&commit_prefix)
+            .await
+            .expect("commits before");
+        let manifests_before = store
+            .list_prefix(&manifest_prefix)
+            .await
+            .expect("manifests before");
+
+        let writes = pipeline
+            .write_snapshot_forget_markers(&store, std::slice::from_ref(&first.snapshot_id))
+            .await
+            .expect("forget markers");
+
+        assert_eq!(writes.markers.len(), 1);
+        assert_eq!(writes.markers[0].snapshot_id, first.snapshot_id);
+        assert!(writes.markers[0].created);
+        assert!(writes.markers[0].marker_object.starts_with("forgets/"));
+
+        let manifests = pipeline
+            .read_committed_snapshot_manifests(&store, &master_key)
+            .await
+            .expect("committed manifests after forget");
+        assert_eq!(
+            manifests
+                .iter()
+                .map(|manifest| manifest.snapshot_id.as_str())
+                .collect::<Vec<_>>(),
+            [second.snapshot_id.as_str()]
+        );
+        assert_eq!(
+            store
+                .list_prefix(&commit_prefix)
+                .await
+                .expect("commits after"),
+            commits_before
+        );
+        assert_eq!(
+            store
+                .list_prefix(&manifest_prefix)
+                .await
+                .expect("manifests after"),
+            manifests_before
+        );
     }
 
     #[test]

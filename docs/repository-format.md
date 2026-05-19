@@ -208,6 +208,27 @@ Current implementation status:
   marker key, snapshot id, and manifest object name agree, then authenticates
   and decrypts the encrypted manifest before returning snapshot metadata.
 
+## Forget Markers
+
+Forget without prune is a state change only. It marks snapshots as no longer
+visible to normal snapshot selection without deleting repository objects.
+
+Current implementation status:
+
+- `ferry forget` writes immutable `forgets/<snapshot-id>` marker objects for
+  snapshots selected by the retention plan.
+- The marker is plaintext JSON containing `schema_version`, `snapshot_id`,
+  `manifest_object`, `commit_object`, and `forgotten_at_unix_seconds`.
+- The plaintext ids and object keys are allowed because the same keyed snapshot
+  id, manifest object key, and commit object key are already visible in
+  repository object names. The marker adds no path, tag, source count,
+  hostname, username, policy, or directory shape information.
+- Marker contents are not trusted. Snapshot discovery validates that the marker
+  key, snapshot id, manifest object name, and commit object name agree before a
+  marker can hide a committed snapshot.
+- Forget markers do not delete chunks, manifests, indexes, or commit markers.
+  Storage reclamation requires the separate two-phase prune path.
+
 Upload state records are encrypted. Interrupted uploads can be retried or
 abandoned based on upload id and writer id. Correctness must not require
 renaming a temporary object into place.

@@ -763,6 +763,7 @@ dependencies = [
  "fileferry-core",
  "fileferry-crypto",
  "fileferry-platform",
+ "fileferry-policy",
  "fileferry-storage",
  "predicates",
  "secrecy",
@@ -821,6 +822,7 @@ dependencies = [
 name = "fileferry-policy"
 version = "0.0.0"
 dependencies = [
+ "serde",
  "thiserror 2.0.18",
 ]
 

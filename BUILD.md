@@ -70,6 +70,15 @@ Last reviewed: 2026-05-19.
   integrity failures with snapshot id, object key, and path context where
   available. Metadata identity mismatches retain the repository object key in
   CLI machine-readable failure output.
+- `ferry forget` opens initialized local repositories, unlocks with
+  `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates currently
+  visible committed encrypted manifests, evaluates `fileferry-policy` keep
+  rules, supports dry-run, and writes immutable snapshot forget markers only
+  when not in dry-run. It does not delete chunks, manifests, indexes, or
+  commit objects; storage reclamation remains unimplemented until prune lands.
+  JSON and JSONL output report candidate snapshots, kept snapshots, forgotten
+  snapshots, item-level reasons, dry-run status, marker objects written, and
+  explicit `object_deletion: false`.
 - CLI config discovery, profiles, environment precedence, redacted
   diagnostics, and machine-output envelopes exist for the current command
   surface.
@@ -110,6 +119,9 @@ Last reviewed: 2026-05-19.
   can discover committed manifests from those markers, and has tested snapshot
   summary and immediate-entry listing primitives for future `snapshots` and
   `ls` commands.
+- `fileferry-core` writes explicit snapshot forget markers and filters
+  forgotten snapshots from normal committed manifest discovery without deleting
+  repository objects.
 - `fileferry-web` serves the public `fileferry.app` homepage with Axum,
   server-rendered Leptos views, embedded CSS, and a `/healthz` endpoint.
 - The initial product brief has been distilled into `README.md`,
@@ -120,12 +132,14 @@ Last reviewed: 2026-05-19.
 The repo is still pre-v1. Restore is wired into the CLI for initialized local
 repositories, directory entries, regular-file contents, Unix symlinks, and
 modified timestamps for restored regular files and directories, but broader
-metadata application and S3-compatible backup/restore/check paths are not
-complete. `ferry check` supports full referenced-chunk verification and
+metadata application and S3-compatible backup/restore/check/forget paths are
+not complete. `ferry check` supports full referenced-chunk verification and
 deterministic count/percentage referenced-chunk subsets for initialized local
-repositories. Describe backup, restore, check, repository, storage, crypto, or
-platform behavior only to the level backed by code, tests, and platform
-evidence.
+repositories. `ferry forget` is marker-only for initialized local repositories;
+it hides forgotten snapshots from normal snapshot discovery but does not
+delete objects or reclaim storage. Describe backup, restore, check, forget,
+repository, storage, crypto, or platform behavior only to the level backed by
+code, tests, and platform evidence.
 
 The `fileferry-web` crate is public marketing infrastructure only. It does not
 turn FileFerry into a backup server, hosted product, daemon, scheduler, or web
@@ -208,6 +222,8 @@ Non-goals:
 
 Goal: Implement safe `ferry forget` planning and snapshot forget markers
 without deleting repository objects.
+
+Status: Complete as of 2026-05-19 for initialized local repositories.
 
 Definition of done:
 
@@ -690,7 +706,7 @@ where documented verification passes on a clean checkout.
 ### Phase 9 - Retention And Prune
 
 - [x] Implement retention policy parser.
-- [ ] Implement `forget`.
+- [x] Implement `forget`.
 - [ ] Implement two-phase prune.
 - [ ] Add prune marks and recovery behavior.
 - [ ] Add dry-run summaries.
@@ -801,6 +817,24 @@ Trust current primary docs and observed behavior over this file.
 
 ## Recent Work
 
+- 2026-05-19 - Completed Milestone 3 forget without prune for initialized
+  local repositories. `ferry forget` now accepts retention keep flags
+  (`--keep-last`, hourly/daily/weekly/monthly/yearly counts, and repeatable
+  `--keep-tag`), supports `--dry-run`, evaluates selection through
+  `fileferry-policy`, and writes immutable `forgets/<snapshot-id>` markers
+  only when not in dry-run. Normal snapshot discovery ignores marked snapshots,
+  but forget does not delete chunks, manifests, indexes, or commit objects and
+  reports `object_deletion: false` in machine output. JSON and JSONL output
+  include candidate, kept, and forgotten snapshot items with item-level
+  reasons, dry-run status, marker counts, and stable no-match/invalid-policy
+  exit behavior. Documented marker-only forget in `docs/cli-contract.md`,
+  `docs/repository-format.md`, and README without claiming prune or
+  S3-compatible forget support. Verified with `cargo test -p
+  fileferry-policy`, `cargo test -p fileferry-core
+  forget_markers_hide_snapshots_without_deleting_repository_objects`, `cargo
+  test -p fileferry-cli forget_`, `cargo test -p fileferry-cli`, `cargo test
+  -p fileferry-core`, `just fmt`, `just check`, `just test`, `just build`,
+  and `git diff --check`.
 - 2026-05-19 - Completed Milestone 2 S3-compatible init. `ferry init` now
   accepts `s3://bucket[/prefix]` repository URLs for encrypted repository
   bootstrap creation through `S3Store` wrapped in the common storage policy.

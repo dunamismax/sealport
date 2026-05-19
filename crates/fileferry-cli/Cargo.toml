@@ -16,6 +16,7 @@ clap_complete.workspace = true
 fileferry-core = { path = "../fileferry-core" }
 fileferry-crypto = { path = "../fileferry-crypto" }
 fileferry-platform = { path = "../fileferry-platform" }
+fileferry-policy = { path = "../fileferry-policy" }
 fileferry-storage = { path = "../fileferry-storage" }
 secrecy.workspace = true
 serde.workspace = true

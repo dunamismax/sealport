@@ -164,7 +164,12 @@ forget
   data.snapshots_matched: integer
   data.snapshots_forgotten: integer
   data.retained_snapshots: integer
-  data.removed_snapshot_ids: array of strings
+  data.object_deletion: boolean
+  data.marker_objects_written: integer
+  data.candidate_snapshots: array of ForgetSnapshotItem
+  data.kept_snapshots: array of ForgetSnapshotItem
+  data.forgotten_snapshots: array of ForgetSnapshotItem
+  data.forgotten_snapshot_ids: array of strings
   data.policy_summary: RetentionPolicySummary
 
 prune
@@ -245,11 +250,21 @@ CheckFinding
   message: string
 
 RetentionPolicySummary
+  keep_last: integer | null
+  keep_hourly: integer | null
   keep_daily: integer | null
   keep_weekly: integer | null
   keep_monthly: integer | null
   keep_yearly: integer | null
   keep_tags: array of strings
+
+ForgetSnapshotItem
+  snapshot_id: string
+  created_at_unix_seconds: integer
+  tags: array of strings
+  action: "keep" | "forget"
+  reasons: array of strings
+  marker_object: string | null
 
 KdfSummary
   algorithm: "argon2id_v19"
@@ -531,9 +546,27 @@ entry paths, non-file chunk references, regular-file size/chunk-length
 mismatches, or non-directory ancestors fail as `snapshot_manifest_invalid`
 integrity errors with snapshot id, object key, and path context when available.
 
+`ferry forget` opens an initialized local repository with
+`FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates currently
+visible committed snapshot manifests, evaluates retention keep rules, and
+writes immutable snapshot forget markers for snapshots not retained by those
+rules. It never deletes chunks, manifests, indexes, or commit objects; object
+deletion is not implemented until `ferry prune` lands separately. `--dry-run`
+evaluates the same plan but writes no forget markers. The implemented keep
+rules are `--keep-last <N>`, `--keep-hourly <N>`, `--keep-daily <N>`,
+`--keep-weekly <N>`, `--keep-monthly <N>`, `--keep-yearly <N>`, and repeatable
+`--keep-tag <TAG>`. Count values must be greater than zero. A policy that would
+forget no currently visible snapshots fails with exit code `7` and
+`forget_no_snapshots_matched`; invalid or empty policies fail with exit code
+`2`. JSON output reports candidate, kept, and forgotten snapshot items,
+item-level reasons, dry-run status, and marker objects written. JSONL output
+emits `load_snapshots`, `evaluate_policy`, `write_forget_state`, and
+`complete` progress phases. S3-compatible forget is not implemented yet.
+
 `ferry snapshots` opens an initialized local repository with
 `FILEFERRY_PASSWORD` or `FILEFERRY_PASSWORD_FILE`, authenticates committed
-snapshot manifests, and emits human, JSON, or JSONL-safe snapshot summaries.
+snapshot manifests that have not been marked forgotten, and emits human, JSON,
+or JSONL-safe snapshot summaries.
 If a committed snapshot marker references a missing manifest object, the
 command fails closed with an integrity failure instead of treating the
 repository as uninitialized.

@@ -37,17 +37,25 @@ fn init_repo(repo_url: &str, passphrase: &str) {
 }
 
 fn backup_source(repo_url: &str, passphrase: &str, source: &std::path::Path) -> Value {
+    backup_source_with_tags(repo_url, passphrase, source, &["cli"])
+}
+
+fn backup_source_with_tags(
+    repo_url: &str,
+    passphrase: &str,
+    source: &std::path::Path,
+    tags: &[&str],
+) -> Value {
+    let mut args = vec!["--repo", repo_url, "--json", "backup"];
+    for tag in tags {
+        args.push("--tag");
+        args.push(tag);
+    }
+    args.push(source.to_str().expect("source path"));
+
     let output = fileferry()
         .env("FILEFERRY_PASSWORD", passphrase)
-        .args([
-            "--repo",
-            repo_url,
-            "--json",
-            "backup",
-            "--tag",
-            "cli",
-            source.to_str().expect("source path"),
-        ])
+        .args(args)
         .assert()
         .success()
         .stderr("")
@@ -56,6 +64,28 @@ fn backup_source(repo_url: &str, passphrase: &str, source: &std::path::Path) -> 
         .clone();
 
     serde_json::from_slice(&output).expect("backup json")
+}
+
+fn file_count_under(path: &Path) -> usize {
+    if !path.exists() {
+        return 0;
+    }
+
+    let mut pending = vec![path.to_path_buf()];
+    let mut count = 0;
+    while let Some(path) = pending.pop() {
+        for entry in fs::read_dir(path).expect("read directory") {
+            let entry = entry.expect("directory entry");
+            let file_type = entry.file_type().expect("entry type");
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                count += 1;
+            }
+        }
+    }
+
+    count
 }
 
 fn set_modified_time(path: &Path, modified: SystemTime) {
@@ -115,6 +145,269 @@ fn init_creates_encrypted_local_repository_and_snapshots_lists_it() {
             .len(),
         0
     );
+}
+
+#[test]
+fn forget_dry_run_reports_plan_without_writing_markers() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let first_source = temp.path().join("first-source");
+    let second_source = temp.path().join("second-source");
+    fs::create_dir(&first_source).expect("create first source");
+    fs::create_dir(&second_source).expect("create second source");
+    fs::write(first_source.join("first.txt"), b"first").expect("write first");
+    fs::write(second_source.join("second.txt"), b"second").expect("write second");
+    backup_source_with_tags(&repo_url, passphrase, &first_source, &["old"]);
+    backup_source_with_tags(&repo_url, passphrase, &second_source, &["new"]);
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "forget",
+            "--dry-run",
+            "--keep-last",
+            "1",
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let forget: Value = serde_json::from_slice(&output).expect("forget json");
+    assert_eq!(forget["command"], "forget");
+    assert_eq!(forget["status"], "success");
+    assert_eq!(forget["data"]["dry_run"], true);
+    assert_eq!(forget["data"]["snapshots_matched"], 2);
+    assert_eq!(forget["data"]["snapshots_forgotten"], 1);
+    assert_eq!(forget["data"]["retained_snapshots"], 1);
+    assert_eq!(forget["data"]["object_deletion"], false);
+    assert_eq!(forget["data"]["marker_objects_written"], 0);
+    assert_eq!(
+        forget["data"]["candidate_snapshots"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        forget["data"]["kept_snapshots"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        forget["data"]["forgotten_snapshots"][0]["reasons"],
+        serde_json::json!(["not-matched-by-keep-rule"])
+    );
+    assert_eq!(file_count_under(&repo.join("forgets")), 0);
+
+    let snapshots_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "snapshots"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let snapshots: Value = serde_json::from_slice(&snapshots_output).expect("snapshots json");
+    assert_eq!(snapshots["data"]["snapshots"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn forget_keep_tag_writes_marker_and_does_not_delete_repository_objects() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let keep_source = temp.path().join("keep-source");
+    let drop_source = temp.path().join("drop-source");
+    fs::create_dir(&keep_source).expect("create keep source");
+    fs::create_dir(&drop_source).expect("create drop source");
+    fs::write(keep_source.join("keep.txt"), b"keep").expect("write keep");
+    fs::write(drop_source.join("drop.txt"), b"drop").expect("write drop");
+    backup_source_with_tags(&repo_url, passphrase, &keep_source, &["keep"]);
+    backup_source_with_tags(&repo_url, passphrase, &drop_source, &["drop"]);
+    let commits_before = file_count_under(&repo.join("commits"));
+    let manifests_before = file_count_under(&repo.join("objects").join("manifest"));
+    let indexes_before = file_count_under(&repo.join("objects").join("index"));
+    let chunks_before = file_count_under(&repo.join("objects").join("chunk"));
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "forget",
+            "--keep-tag",
+            "keep",
+        ])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let forget: Value = serde_json::from_slice(&output).expect("forget json");
+    assert_eq!(forget["data"]["dry_run"], false);
+    assert_eq!(forget["data"]["snapshots_forgotten"], 1);
+    assert_eq!(forget["data"]["retained_snapshots"], 1);
+    assert_eq!(forget["data"]["marker_objects_written"], 1);
+    assert_eq!(
+        forget["data"]["kept_snapshots"][0]["reasons"],
+        serde_json::json!(["keep-tag:keep"])
+    );
+    assert!(
+        forget["data"]["forgotten_snapshots"][0]["marker_object"]
+            .as_str()
+            .expect("marker object")
+            .starts_with("forgets/")
+    );
+    assert_eq!(file_count_under(&repo.join("forgets")), 1);
+    assert_eq!(file_count_under(&repo.join("commits")), commits_before);
+    assert_eq!(
+        file_count_under(&repo.join("objects").join("manifest")),
+        manifests_before
+    );
+    assert_eq!(
+        file_count_under(&repo.join("objects").join("index")),
+        indexes_before
+    );
+    assert_eq!(
+        file_count_under(&repo.join("objects").join("chunk")),
+        chunks_before
+    );
+
+    let snapshots_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "snapshots"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let snapshots: Value = serde_json::from_slice(&snapshots_output).expect("snapshots json");
+    assert_eq!(snapshots["data"]["snapshots"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        snapshots["data"]["snapshots"][0]["tags"],
+        serde_json::json!(["keep"])
+    );
+}
+
+#[test]
+fn forget_jsonl_reports_progress_and_completion_envelope() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let first_source = temp.path().join("first-source");
+    let second_source = temp.path().join("second-source");
+    fs::create_dir(&first_source).expect("create first source");
+    fs::create_dir(&second_source).expect("create second source");
+    fs::write(first_source.join("first.txt"), b"first").expect("write first");
+    fs::write(second_source.join("second.txt"), b"second").expect("write second");
+    backup_source_with_tags(&repo_url, passphrase, &first_source, &["first"]);
+    backup_source_with_tags(&repo_url, passphrase, &second_source, &["second"]);
+
+    let output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--jsonl", "forget", "--keep-last", "1"])
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let events = String::from_utf8(output)
+        .expect("jsonl utf8")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("jsonl event"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(events.first().unwrap()["event"], "command_started");
+    assert_eq!(events.last().unwrap()["event"], "command_completed");
+    assert_eq!(events.last().unwrap()["command"], "forget");
+    assert_eq!(events.last().unwrap()["data"]["snapshots_forgotten"], 1);
+    assert!(
+        events
+            .iter()
+            .any(|event| event["data"]["phase"] == "write_forget_state")
+    );
+}
+
+#[test]
+fn forget_no_match_and_invalid_policy_have_stable_exit_codes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let repo_url = repo.display().to_string();
+    let passphrase = "test-passphrase";
+    init_repo(&repo_url, passphrase);
+
+    let source = temp.path().join("source");
+    fs::create_dir(&source).expect("create source");
+    fs::write(source.join("sample.txt"), b"sample").expect("write sample");
+    backup_source(&repo_url, passphrase, &source);
+
+    let no_match_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "forget", "--keep-last", "1"])
+        .assert()
+        .code(7)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let no_match: Value = serde_json::from_slice(&no_match_output).expect("no-match json");
+    assert_eq!(no_match["status"], "failure");
+    assert_eq!(no_match["data"]["code"], "forget_no_snapshots_matched");
+    assert_eq!(no_match["data"]["exit_code"], 7);
+
+    let invalid_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args(["--repo", &repo_url, "--json", "forget", "--keep-last", "0"])
+        .assert()
+        .code(2)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let invalid: Value = serde_json::from_slice(&invalid_output).expect("invalid policy json");
+    assert_eq!(invalid["status"], "failure");
+    assert_eq!(invalid["data"]["code"], "retention_policy_count_invalid");
+    assert_eq!(invalid["data"]["exit_code"], 2);
+
+    let invalid_tag_output = fileferry()
+        .env("FILEFERRY_PASSWORD", passphrase)
+        .args([
+            "--repo",
+            &repo_url,
+            "--json",
+            "forget",
+            "--keep-tag",
+            "bad,tag",
+        ])
+        .assert()
+        .code(2)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let invalid_tag: Value = serde_json::from_slice(&invalid_tag_output).expect("invalid tag json");
+    assert_eq!(invalid_tag["status"], "failure");
+    assert_eq!(invalid_tag["data"]["code"], "retention_policy_tag_invalid");
+    assert_eq!(invalid_tag["data"]["exit_code"], 2);
 }
 
 #[test]

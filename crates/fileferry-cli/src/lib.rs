@@ -8,6 +8,10 @@ use fileferry_core::{
 };
 use fileferry_crypto::KdfParams;
 use fileferry_platform::{EntryKind, MetadataValue};
+use fileferry_policy::{
+    PolicyError, RetentionAction, RetentionCount, RetentionDecision, RetentionPlan,
+    RetentionPolicy, RetentionSnapshot,
+};
 use fileferry_storage::{
     LocalStore, ObjectKeyPrefix, ObjectStore, PolicyObjectStore, S3Store, S3StoreConfig,
     StorageError, StoragePolicy,
@@ -132,6 +136,41 @@ pub enum Command {
         read_data_subset: Option<CheckReadDataSubset>,
     },
 
+    /// Mark snapshots forgotten without deleting repository objects.
+    Forget {
+        /// Report what would be forgotten without writing forget markers.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Keep the newest N snapshots.
+        #[arg(long = "keep-last", value_name = "N")]
+        keep_last: Option<u32>,
+
+        /// Keep the newest snapshot per hour for N hourly buckets.
+        #[arg(long = "keep-hourly", value_name = "N")]
+        keep_hourly: Option<u32>,
+
+        /// Keep the newest snapshot per day for N daily buckets.
+        #[arg(long = "keep-daily", value_name = "N")]
+        keep_daily: Option<u32>,
+
+        /// Keep the newest snapshot per week for N weekly buckets.
+        #[arg(long = "keep-weekly", value_name = "N")]
+        keep_weekly: Option<u32>,
+
+        /// Keep the newest snapshot per month for N monthly buckets.
+        #[arg(long = "keep-monthly", value_name = "N")]
+        keep_monthly: Option<u32>,
+
+        /// Keep the newest snapshot per year for N yearly buckets.
+        #[arg(long = "keep-yearly", value_name = "N")]
+        keep_yearly: Option<u32>,
+
+        /// Keep snapshots carrying this tag. May be repeated.
+        #[arg(long = "keep-tag")]
+        keep_tags: Vec<String>,
+    },
+
     /// Restore entries from a committed snapshot.
     Restore {
         /// Snapshot id to restore.
@@ -176,6 +215,7 @@ impl Command {
             Self::Snapshots => "snapshots",
             Self::Ls { .. } => "ls",
             Self::Check { .. } => "check",
+            Self::Forget { .. } => "forget",
             Self::Restore { .. } => "restore",
             Self::Version => "version",
         }
@@ -193,6 +233,9 @@ pub enum CliError {
     #[error(transparent)]
     Core(Box<CoreError>),
 
+    #[error(transparent)]
+    Policy(#[from] PolicyError),
+
     #[error("JSON serialization failed")]
     Json(#[from] serde_json::Error),
 
@@ -206,6 +249,7 @@ impl CliError {
             Self::Config(_) => 2,
             Self::Repository(error) => error.exit_code(),
             Self::Core(error) => core_exit_code(error),
+            Self::Policy(_) => 2,
             Self::Json(_) | Self::Completion(_) => 1,
         }
     }
@@ -280,12 +324,16 @@ fn core_exit_code(error: &CoreError) -> i32 {
         | CoreError::UnsupportedRepositoryFormat { .. }
         | CoreError::UnsupportedRepositoryFeatures => 3,
         CoreError::RepositoryUnlock { .. } => 4,
-        CoreError::SnapshotNotFound { .. } | CoreError::SnapshotPathNotFound { .. } => 7,
+        CoreError::SnapshotNotFound { .. }
+        | CoreError::ForgetNoSnapshotsMatched
+        | CoreError::SnapshotPathNotFound { .. } => 7,
         CoreError::RepositoryBootstrapDecode { .. }
         | CoreError::InvalidRepositoryBootstrap { .. }
         | CoreError::InvalidSnapshotManifest { .. }
         | CoreError::CommitDecode { .. }
         | CoreError::InvalidCommitMarker { .. }
+        | CoreError::ForgetMarkerDecode { .. }
+        | CoreError::InvalidForgetMarker { .. }
         | CoreError::MetadataIdentityMismatch { .. }
         | CoreError::ObjectDecode { .. }
         | CoreError::ObjectAuthentication { .. }
@@ -615,6 +663,42 @@ struct LsData {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
+struct ForgetData {
+    dry_run: bool,
+    snapshots_matched: usize,
+    snapshots_forgotten: usize,
+    retained_snapshots: usize,
+    object_deletion: bool,
+    marker_objects_written: usize,
+    candidate_snapshots: Vec<ForgetSnapshotItem>,
+    kept_snapshots: Vec<ForgetSnapshotItem>,
+    forgotten_snapshots: Vec<ForgetSnapshotItem>,
+    forgotten_snapshot_ids: Vec<String>,
+    policy_summary: RetentionPolicySummary,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct ForgetSnapshotItem {
+    snapshot_id: String,
+    created_at_unix_seconds: u64,
+    tags: Vec<String>,
+    action: RetentionAction,
+    reasons: Vec<String>,
+    marker_object: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct RetentionPolicySummary {
+    keep_last: Option<u32>,
+    keep_hourly: Option<u32>,
+    keep_daily: Option<u32>,
+    keep_weekly: Option<u32>,
+    keep_monthly: Option<u32>,
+    keep_yearly: Option<u32>,
+    keep_tags: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct CliSnapshotEntry {
     path: String,
     kind: EntryKind,
@@ -700,6 +784,28 @@ pub fn run(cli: Cli) -> Result<Output, CliError> {
         Command::Check { read_data_subset } => {
             let config = resolve_config(&cli.globals)?;
             check(mode, &config, read_data_subset)
+        }
+        Command::Forget {
+            dry_run,
+            keep_last,
+            keep_hourly,
+            keep_daily,
+            keep_weekly,
+            keep_monthly,
+            keep_yearly,
+            keep_tags,
+        } => {
+            let config = resolve_config(&cli.globals)?;
+            let policy = retention_policy_from_args(
+                keep_last,
+                keep_hourly,
+                keep_daily,
+                keep_weekly,
+                keep_monthly,
+                keep_yearly,
+                keep_tags,
+            )?;
+            forget(mode, &config, policy, dry_run)
         }
         Command::Restore {
             snapshot,
@@ -847,6 +953,14 @@ fn failure_code(error: &CliError) -> &'static str {
             RepositoryError::Runtime { .. } => "repository_runtime_failed",
         },
         CliError::Core(error) => core_failure_code(error),
+        CliError::Policy(error) => match error {
+            PolicyError::EmptyPolicy => "retention_policy_empty",
+            PolicyError::UnknownRule { .. } => "retention_policy_rule_unknown",
+            PolicyError::MissingValue { .. } => "retention_policy_value_missing",
+            PolicyError::DuplicateRule { .. } => "retention_policy_rule_duplicated",
+            PolicyError::InvalidCount { .. } => "retention_policy_count_invalid",
+            PolicyError::InvalidTag { .. } => "retention_policy_tag_invalid",
+        },
         CliError::Json(_) => "json_serialization_failed",
         CliError::Completion(_) => "completion_generation_failed",
     }
@@ -878,6 +992,9 @@ fn core_failure_code(error: &CoreError) -> &'static str {
         CoreError::MetadataIdentityMismatch { .. } => "repository_metadata_identity_mismatch",
         CoreError::CommitDecode { .. } => "repository_commit_decode_failed",
         CoreError::InvalidCommitMarker { .. } => "repository_commit_marker_invalid",
+        CoreError::ForgetNoSnapshotsMatched => "forget_no_snapshots_matched",
+        CoreError::ForgetMarkerDecode { .. } => "repository_forget_marker_decode_failed",
+        CoreError::InvalidForgetMarker { .. } => "repository_forget_marker_invalid",
         CoreError::RepositoryBootstrapDecode { .. } => "repository_bootstrap_decode_failed",
         CoreError::RepositoryNotInitialized => "repository_not_initialized",
         CoreError::InvalidRepositoryBootstrap { .. } => "repository_bootstrap_invalid",
@@ -963,6 +1080,7 @@ fn failure_path(error: &CliError) -> Option<String> {
             _ => None,
         },
         CliError::Core(error) => core_failure_path(error),
+        CliError::Policy(_) => None,
         CliError::Json(_) | CliError::Completion(_) => None,
     }
 }
@@ -1030,6 +1148,8 @@ fn core_failure_object_key(error: &CoreError) -> Option<String> {
         }
         | CoreError::CommitDecode { key, .. }
         | CoreError::InvalidCommitMarker { key, .. }
+        | CoreError::ForgetMarkerDecode { key, .. }
+        | CoreError::InvalidForgetMarker { key, .. }
         | CoreError::RepositoryCheckMissingObject { key }
         | CoreError::RepositoryReferencedObjectMissing { key } => Some(key.as_str().to_owned()),
         CoreError::MissingChunkIndexEntry { object_key, .. }
@@ -1503,6 +1623,56 @@ fn check(
     emit_check_command(mode, data)
 }
 
+fn forget(
+    mode: OutputMode,
+    config: &ResolvedConfig,
+    policy: RetentionPolicy,
+    dry_run: bool,
+) -> Result<Output, CliError> {
+    let repository = local_repository(config)?;
+    let passphrase = repository_passphrase()?;
+    let runtime = tokio_runtime()?;
+    let opened = runtime.block_on(open_repository(&repository.store, &passphrase))?;
+    let pipeline = BackupPipeline::new(BackupPipelineConfig::new(opened.repository_id))?;
+    let manifests = runtime.block_on(
+        pipeline.read_committed_snapshot_manifests(&repository.store, &opened.master_key),
+    )?;
+    let snapshots = manifests
+        .iter()
+        .map(|manifest| RetentionSnapshot {
+            snapshot_id: manifest.snapshot_id.clone(),
+            created_at_unix_seconds: manifest.body.created_at_unix_seconds,
+            tags: manifest.body.tags.clone(),
+        })
+        .collect::<Vec<_>>();
+    let plan = policy.plan(&snapshots);
+    let forgotten_snapshot_ids = plan
+        .forgotten()
+        .into_iter()
+        .map(|decision| decision.snapshot_id.clone())
+        .collect::<Vec<_>>();
+
+    if forgotten_snapshot_ids.is_empty() {
+        return Err(CoreError::ForgetNoSnapshotsMatched.into());
+    }
+
+    let marker_writes = if dry_run {
+        BTreeMap::new()
+    } else {
+        runtime
+            .block_on(
+                pipeline.write_snapshot_forget_markers(&repository.store, &forgotten_snapshot_ids),
+            )?
+            .markers
+            .into_iter()
+            .map(|write| (write.snapshot_id, (write.marker_object, write.created)))
+            .collect()
+    };
+    let data = forget_data(policy, plan, dry_run, marker_writes);
+
+    emit_forget_command(mode, data)
+}
+
 fn restore(
     mode: OutputMode,
     config: &ResolvedConfig,
@@ -1916,6 +2086,102 @@ fn parse_read_data_subset(value: &str) -> Result<CheckReadDataSubset, String> {
     CheckReadDataSubset::count(count).map_err(|error| error.to_string())
 }
 
+fn retention_policy_from_args(
+    keep_last: Option<u32>,
+    keep_hourly: Option<u32>,
+    keep_daily: Option<u32>,
+    keep_weekly: Option<u32>,
+    keep_monthly: Option<u32>,
+    keep_yearly: Option<u32>,
+    keep_tags: Vec<String>,
+) -> Result<RetentionPolicy, PolicyError> {
+    RetentionPolicy {
+        keep_last: keep_last.map(RetentionCount::new).transpose()?,
+        keep_hourly: keep_hourly.map(RetentionCount::new).transpose()?,
+        keep_daily: keep_daily.map(RetentionCount::new).transpose()?,
+        keep_weekly: keep_weekly.map(RetentionCount::new).transpose()?,
+        keep_monthly: keep_monthly.map(RetentionCount::new).transpose()?,
+        keep_yearly: keep_yearly.map(RetentionCount::new).transpose()?,
+        keep_tags,
+    }
+    .validate()
+}
+
+fn forget_data(
+    policy: RetentionPolicy,
+    plan: RetentionPlan,
+    dry_run: bool,
+    marker_writes: BTreeMap<String, (String, bool)>,
+) -> ForgetData {
+    let candidate_snapshots = plan
+        .candidates()
+        .iter()
+        .map(|decision| forget_item(decision, &marker_writes))
+        .collect::<Vec<_>>();
+    let kept_snapshots = candidate_snapshots
+        .iter()
+        .filter(|item| item.action == RetentionAction::Keep)
+        .cloned()
+        .collect::<Vec<_>>();
+    let forgotten_snapshots = candidate_snapshots
+        .iter()
+        .filter(|item| item.action == RetentionAction::Forget)
+        .cloned()
+        .collect::<Vec<_>>();
+    let forgotten_snapshot_ids = forgotten_snapshots
+        .iter()
+        .map(|item| item.snapshot_id.clone())
+        .collect::<Vec<_>>();
+    let marker_objects_written = marker_writes
+        .values()
+        .filter(|(_, created)| *created)
+        .count();
+
+    ForgetData {
+        dry_run,
+        snapshots_matched: candidate_snapshots.len(),
+        snapshots_forgotten: forgotten_snapshots.len(),
+        retained_snapshots: kept_snapshots.len(),
+        object_deletion: false,
+        marker_objects_written,
+        candidate_snapshots,
+        kept_snapshots,
+        forgotten_snapshots,
+        forgotten_snapshot_ids,
+        policy_summary: RetentionPolicySummary::from_policy(&policy),
+    }
+}
+
+fn forget_item(
+    decision: &RetentionDecision,
+    marker_writes: &BTreeMap<String, (String, bool)>,
+) -> ForgetSnapshotItem {
+    ForgetSnapshotItem {
+        snapshot_id: decision.snapshot_id.clone(),
+        created_at_unix_seconds: decision.created_at_unix_seconds,
+        tags: decision.tags.clone(),
+        action: decision.action,
+        reasons: decision.reasons.clone(),
+        marker_object: marker_writes
+            .get(&decision.snapshot_id)
+            .map(|(marker_object, _)| marker_object.clone()),
+    }
+}
+
+impl RetentionPolicySummary {
+    fn from_policy(policy: &RetentionPolicy) -> Self {
+        Self {
+            keep_last: policy.keep_last.map(RetentionCount::get),
+            keep_hourly: policy.keep_hourly.map(RetentionCount::get),
+            keep_daily: policy.keep_daily.map(RetentionCount::get),
+            keep_weekly: policy.keep_weekly.map(RetentionCount::get),
+            keep_monthly: policy.keep_monthly.map(RetentionCount::get),
+            keep_yearly: policy.keep_yearly.map(RetentionCount::get),
+            keep_tags: policy.keep_tags.clone(),
+        }
+    }
+}
+
 fn emit_command<T>(
     mode: OutputMode,
     command: &'static str,
@@ -2237,6 +2503,85 @@ fn emit_check_command(
                 schema_version: OUTPUT_SCHEMA_VERSION,
                 event: EventKind::CommandCompleted,
                 command: "check",
+                status: CommandStatus::Success,
+                data: Some(data),
+            };
+            lines.push(serde_json::to_string(&completed)?);
+            lines.join("\n") + "\n"
+        }
+    };
+
+    Ok(Output {
+        stdout,
+        stderr: String::new(),
+        exit_code: 0,
+    })
+}
+
+fn emit_forget_command(mode: OutputMode, data: ForgetData) -> Result<Output, CliError> {
+    let stdout = match mode {
+        OutputMode::Human => {
+            let action = if data.dry_run {
+                "Would mark forgotten"
+            } else {
+                "Marked forgotten"
+            };
+            format!(
+                "{} {} snapshot(s)\nretained_snapshots={} candidate_snapshots={} marker_objects_written={} object_deletion=false\n",
+                action,
+                data.snapshots_forgotten,
+                data.retained_snapshots,
+                data.snapshots_matched,
+                data.marker_objects_written
+            )
+        }
+        OutputMode::Json => {
+            let document = CommandDocument {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                command: "forget",
+                status: CommandStatus::Success,
+                data,
+            };
+            format!("{}\n", serde_json::to_string_pretty(&document)?)
+        }
+        OutputMode::Jsonl => {
+            let started = CommandEvent::<ForgetData> {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                event: EventKind::CommandStarted,
+                command: "forget",
+                status: CommandStatus::Started,
+                data: None,
+            };
+            let phases = [
+                ("load_snapshots", "loaded committed snapshots"),
+                ("evaluate_policy", "evaluated retention policy"),
+                ("write_forget_state", "wrote snapshot forget markers"),
+                ("complete", "completed forget"),
+            ];
+            let mut lines = vec![serde_json::to_string(&started)?];
+            for (phase, message) in phases {
+                let event = CommandEvent {
+                    schema_version: OUTPUT_SCHEMA_VERSION,
+                    event: EventKind::Progress,
+                    command: "forget",
+                    status: CommandStatus::Started,
+                    data: Some(ProgressData {
+                        phase,
+                        message,
+                        items_done: Some(data.snapshots_matched),
+                        items_total: Some(data.snapshots_matched),
+                        bytes_done: None,
+                        bytes_total: None,
+                        snapshot_id: None,
+                        object_key: None,
+                    }),
+                };
+                lines.push(serde_json::to_string(&event)?);
+            }
+            let completed = CommandEvent {
+                schema_version: OUTPUT_SCHEMA_VERSION,
+                event: EventKind::CommandCompleted,
+                command: "forget",
                 status: CommandStatus::Success,
                 data: Some(data),
             };
